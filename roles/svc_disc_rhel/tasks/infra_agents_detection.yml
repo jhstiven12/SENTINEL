@@ -1,0 +1,421 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/tasks/infra_agents_detection.yml
+# Detección de agentes de infraestructura, seguridad, monitoreo,
+# DNS, LDAP, Kubernetes control plane y secrets management
+# que pueden correr fuera de systemd.
+#
+# Categorías:
+#   SECURITY_AGENT   — Splunk Forwarder, Qualys, CrowdStrike, OSSEC, Wazuh,
+#                       Tripwire, ClamAV, Lynis
+#   MONITORING_AGENT — Zabbix, Prometheus (node_exporter, alertmanager),
+#                       Grafana, Telegraf, Datadog, Filebeat, Metricbeat,
+#                       Fluentd, Fluent Bit, Collectd, Nagios NRPE,
+#                       SNMP (snmpd)
+#   DNS              — BIND (named), dnsmasq, Unbound, CoreDNS
+#   LDAP             — slapd, 389-ds, sssd
+#   MAIL             — Postfix, Dovecot, Sendmail
+#   SECRETS          — HashiCorp Vault, Consul
+#   K8S_CONTROL      — kube-apiserver, kube-scheduler, kube-controller-manager,
+#                       etcd, coredns
+#   SCHEDULER        — Celery, Sidekiq
+#   STORAGE          — NFS (nfsd, rpc.mountd), Samba (smbd, nmbd)
+#   CLUSTER          — Zookeeper, etcd (standalone)
+#
+# Variables producidas:
+#   svc_disc_rhel_infra_services — lista en formato canónico
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Recolectar procesos de infraestructura con ps
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | infra | Detectar procesos de infraestructura
+  block:
+    - name: Svc_disc_rhel | infra | ps — buscar agentes y servicios infra
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ps -eo pid,user,pcpu,rss,etime,args --no-headers 2>/dev/null |
+          awk '
+            /splunkd/          || /SplunkForwarder/ ||
+            /qualys-cloud/     || /qualys_mon/      ||
+            /falcon-sensor/    || /csfalconservice/  ||
+            /ossec/            || /wazuh/            ||
+            /clamd/            || /freshclam/        ||
+            /zabbix_agentd/    || /zabbix_agent2/    ||
+            /node_exporter/    || /prometheus/        ||
+            /alertmanager/     || /grafana-server/    ||
+            /telegraf/         || /datadog-agent/     ||
+            /filebeat/         || /metricbeat/        ||
+            /fluentd/          || /fluent-bit/        ||
+            /collectd/         || /nrpe/              ||
+            /snmpd/            ||
+            /named/            || /dnsmasq/           ||
+            /unbound/          || /coredns/           ||
+            /slapd/            || /ns-slapd/          ||
+            /sssd/             ||
+            /master.*postfix/  || /dovecot/           ||
+            /sendmail/         ||
+            /vault.*server/    || /consul.*agent/     ||
+            /kube-apiserver/   || /kube-scheduler/    ||
+            /kube-controller/  || /etcd/              ||
+            /celery/           || /sidekiq/           ||
+            /nfsd/             || /rpc\.mountd/       ||
+            /smbd/             || /nmbd/              ||
+            /zookeeper/        {
+              print $1"|"$2"|"$3"|"$4"|"$5"|"substr($0, index($0,$6))
+            }
+          '
+        executable: /bin/bash
+      register: svc_disc_rhel_infra_ps_raw
+      changed_when: false
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery, infra]
+
+  rescue:
+    - name: Svc_disc_rhel | infra | ERROR en ps infra
+      ansible.builtin.debug:
+        msg: "[ERROR] svc_disc_rhel — infra detect: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, infra]
+
+  always:
+    - name: Svc_disc_rhel | infra | Garantizar svc_disc_rhel_infra_ps_raw
+      ansible.builtin.set_fact:
+        svc_disc_rhel_infra_ps_raw: "{{ svc_disc_rhel_infra_ps_raw | default({'stdout_lines': []}) }}"
+        cacheable: false
+      tags: [discovery, infra]
+
+# ---------------------------------------------------------------------------
+# 2. Obtener versiones (best-effort)
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | infra | Detectar versiones de agentes clave
+  block:
+    - name: Svc_disc_rhel | infra | Versión Splunk Forwarder  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: >
+          /opt/splunkforwarder/bin/splunk version 2>/dev/null ||
+          /opt/splunk/bin/splunk version 2>/dev/null || true
+        executable: /bin/bash
+      register: svc_disc_rhel_infra_splunk_ver
+      changed_when: false
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 10
+      tags: [discovery, infra]
+
+    - name: Svc_disc_rhel | infra | Versión Qualys Cloud Agent  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: >
+          /usr/local/qualys/cloud-agent/bin/qualys-cloud-agent --version 2>/dev/null || true
+        executable: /bin/bash
+      register: svc_disc_rhel_infra_qualys_ver
+      changed_when: false
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 10
+      tags: [discovery, infra]
+
+    - name: Svc_disc_rhel | infra | Versión CrowdStrike Falcon  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: >
+          /opt/CrowdStrike/falconctl -g --version 2>/dev/null || true
+        executable: /bin/bash
+      register: svc_disc_rhel_infra_falcon_ver
+      changed_when: false
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 10
+      tags: [discovery, infra]
+
+    - name: Svc_disc_rhel | infra | Versión Zabbix Agent  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: zabbix_agentd --version 2>/dev/null | head -1 || zabbix_agent2 --version 2>/dev/null | head -1 || true
+        executable: /bin/bash
+      register: svc_disc_rhel_infra_zabbix_ver
+      changed_when: false
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 10
+      tags: [discovery, infra]
+
+    - name: Svc_disc_rhel | infra | Versión Vault  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: vault version 2>/dev/null || true
+        executable: /bin/bash
+      register: svc_disc_rhel_infra_vault_ver
+      changed_when: false
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 10
+      tags: [discovery, infra]
+
+  rescue:
+    - name: Svc_disc_rhel | infra | WARN versiones
+      ansible.builtin.debug:
+        msg: "[WARN] svc_disc_rhel — infra version detect best-effort"
+      tags: [discovery, infra]
+
+# ---------------------------------------------------------------------------
+# 3. Normalizar → svc_disc_rhel_infra_services
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | infra | Construir svc_disc_rhel_infra_services
+  ansible.builtin.set_fact:
+    svc_disc_rhel_infra_services: >-
+      {%- set ns = namespace(svcs=[], seen=[]) -%}
+      {%- set known = svc_disc_rhel_parsed_services | default([])
+                      | map(attribute='MainPID', default='0')
+                      | map('trim') | list -%}
+
+      {%- set splunk_ver = svc_disc_rhel_infra_splunk_ver.stdout | default('') | trim -%}
+      {%- set qualys_ver = svc_disc_rhel_infra_qualys_ver.stdout | default('') | trim -%}
+      {%- set falcon_ver = svc_disc_rhel_infra_falcon_ver.stdout | default('') | trim -%}
+      {%- set zabbix_ver = svc_disc_rhel_infra_zabbix_ver.stdout | default('') | trim -%}
+      {%- set vault_ver = svc_disc_rhel_infra_vault_ver.stdout | default('') | trim -%}
+
+      {%- for line in svc_disc_rhel_infra_ps_raw.stdout_lines | default([]) -%}
+        {%- set cols = line.split('|') -%}
+        {%- if cols|length >= 6 -%}
+          {%- set pid = cols[0]|trim -%}
+          {%- set user = cols[1]|trim -%}
+          {%- set cpu = cols[2]|trim -%}
+          {%- set rss_kb = cols[3]|trim -%}
+          {%- set etime = cols[4]|trim -%}
+          {%- set cmdline = cols[5:]|join('|')|trim -%}
+
+          {%- if pid not in known and pid not in ns.seen -%}
+            {%- set _ = ns.seen.append(pid) -%}
+
+            {%- set svc_name = 'infra-' ~ pid -%}
+            {%- set svc_type = 'UNKNOWN' -%}
+            {%- set tech = 'UNKNOWN' -%}
+            {%- set version = none -%}
+
+            {# ── Security Agents ── #}
+            {%- if 'splunkd' in cmdline or 'SplunkForwarder' in cmdline -%}
+              {%- set svc_name = 'splunk-forwarder' -%}
+              {%- set svc_type = 'SECURITY_AGENT' -%}
+              {%- set tech = 'SPLUNK_FORWARDER' -%}
+              {%- set version = splunk_ver[:200] if splunk_ver|length > 0 else none -%}
+            {%- elif 'qualys-cloud' in cmdline or 'qualys_mon' in cmdline -%}
+              {%- set svc_name = 'qualys-agent' -%}
+              {%- set svc_type = 'SECURITY_AGENT' -%}
+              {%- set tech = 'QUALYS' -%}
+              {%- set version = qualys_ver[:200] if qualys_ver|length > 0 else none -%}
+            {%- elif 'falcon-sensor' in cmdline or 'csfalconservice' in cmdline -%}
+              {%- set svc_name = 'crowdstrike-falcon' -%}
+              {%- set svc_type = 'SECURITY_AGENT' -%}
+              {%- set tech = 'CROWDSTRIKE' -%}
+              {%- set version = falcon_ver[:200] if falcon_ver|length > 0 else none -%}
+            {%- elif 'ossec' in cmdline -%}
+              {%- set svc_name = 'ossec-agent' -%}
+              {%- set svc_type = 'SECURITY_AGENT' -%}
+              {%- set tech = 'OSSEC' -%}
+            {%- elif 'wazuh' in cmdline -%}
+              {%- set svc_name = 'wazuh-agent' -%}
+              {%- set svc_type = 'SECURITY_AGENT' -%}
+              {%- set tech = 'WAZUH' -%}
+            {%- elif 'clamd' in cmdline or 'freshclam' in cmdline -%}
+              {%- set svc_name = 'clamav' -%}
+              {%- set svc_type = 'SECURITY_AGENT' -%}
+              {%- set tech = 'CLAMAV' -%}
+
+            {# ── Monitoring Agents ── #}
+            {%- elif 'zabbix_agentd' in cmdline or 'zabbix_agent2' in cmdline -%}
+              {%- set svc_name = 'zabbix-agent' -%}
+              {%- set svc_type = 'MONITORING_AGENT' -%}
+              {%- set tech = 'ZABBIX' -%}
+              {%- set version = zabbix_ver[:200] if zabbix_ver|length > 0 else none -%}
+            {%- elif 'node_exporter' in cmdline -%}
+              {%- set svc_name = 'node-exporter' -%}
+              {%- set svc_type = 'MONITORING_AGENT' -%}
+              {%- set tech = 'PROMETHEUS' -%}
+            {%- elif 'prometheus' in cmdline and 'node_exporter' not in cmdline -%}
+              {%- set svc_name = 'prometheus-server' -%}
+              {%- set svc_type = 'MONITORING' -%}
+              {%- set tech = 'PROMETHEUS' -%}
+            {%- elif 'alertmanager' in cmdline -%}
+              {%- set svc_name = 'alertmanager' -%}
+              {%- set svc_type = 'MONITORING' -%}
+              {%- set tech = 'PROMETHEUS' -%}
+            {%- elif 'grafana-server' in cmdline -%}
+              {%- set svc_name = 'grafana' -%}
+              {%- set svc_type = 'MONITORING' -%}
+              {%- set tech = 'GRAFANA' -%}
+            {%- elif 'telegraf' in cmdline -%}
+              {%- set svc_name = 'telegraf' -%}
+              {%- set svc_type = 'MONITORING_AGENT' -%}
+              {%- set tech = 'TELEGRAF' -%}
+            {%- elif 'datadog-agent' in cmdline -%}
+              {%- set svc_name = 'datadog-agent' -%}
+              {%- set svc_type = 'MONITORING_AGENT' -%}
+              {%- set tech = 'DATADOG' -%}
+            {%- elif 'filebeat' in cmdline -%}
+              {%- set svc_name = 'filebeat' -%}
+              {%- set svc_type = 'LOG_SHIPPER' -%}
+              {%- set tech = 'ELASTIC_BEATS' -%}
+            {%- elif 'metricbeat' in cmdline -%}
+              {%- set svc_name = 'metricbeat' -%}
+              {%- set svc_type = 'MONITORING_AGENT' -%}
+              {%- set tech = 'ELASTIC_BEATS' -%}
+            {%- elif 'fluentd' in cmdline -%}
+              {%- set svc_name = 'fluentd' -%}
+              {%- set svc_type = 'LOG_SHIPPER' -%}
+              {%- set tech = 'FLUENTD' -%}
+            {%- elif 'fluent-bit' in cmdline -%}
+              {%- set svc_name = 'fluent-bit' -%}
+              {%- set svc_type = 'LOG_SHIPPER' -%}
+              {%- set tech = 'FLUENT_BIT' -%}
+            {%- elif 'collectd' in cmdline -%}
+              {%- set svc_name = 'collectd' -%}
+              {%- set svc_type = 'MONITORING_AGENT' -%}
+              {%- set tech = 'COLLECTD' -%}
+            {%- elif 'nrpe' in cmdline -%}
+              {%- set svc_name = 'nagios-nrpe' -%}
+              {%- set svc_type = 'MONITORING_AGENT' -%}
+              {%- set tech = 'NAGIOS' -%}
+            {%- elif 'snmpd' in cmdline -%}
+              {%- set svc_name = 'snmpd' -%}
+              {%- set svc_type = 'MONITORING_AGENT' -%}
+              {%- set tech = 'SNMP' -%}
+
+            {# ── DNS ── #}
+            {%- elif 'named' in cmdline and 'dnsmasq' not in cmdline -%}
+              {%- set svc_name = 'bind-dns' -%}
+              {%- set svc_type = 'DNS' -%}
+              {%- set tech = 'BIND' -%}
+            {%- elif 'dnsmasq' in cmdline -%}
+              {%- set svc_name = 'dnsmasq' -%}
+              {%- set svc_type = 'DNS' -%}
+              {%- set tech = 'DNSMASQ' -%}
+            {%- elif 'unbound' in cmdline -%}
+              {%- set svc_name = 'unbound-dns' -%}
+              {%- set svc_type = 'DNS' -%}
+              {%- set tech = 'UNBOUND' -%}
+            {%- elif 'coredns' in cmdline -%}
+              {%- set svc_name = 'coredns' -%}
+              {%- set svc_type = 'DNS' -%}
+              {%- set tech = 'COREDNS' -%}
+
+            {# ── LDAP ── #}
+            {%- elif 'slapd' in cmdline or 'ns-slapd' in cmdline -%}
+              {%- set svc_name = 'ldap-server' -%}
+              {%- set svc_type = 'LDAP' -%}
+              {%- set tech = 'OPENLDAP' if 'ns-slapd' not in cmdline else '389DS' -%}
+            {%- elif 'sssd' in cmdline -%}
+              {%- set svc_name = 'sssd' -%}
+              {%- set svc_type = 'LDAP' -%}
+              {%- set tech = 'SSSD' -%}
+
+            {# ── Mail ── #}
+            {%- elif 'postfix' in cmdline -%}
+              {%- set svc_name = 'postfix' -%}
+              {%- set svc_type = 'MAIL' -%}
+              {%- set tech = 'POSTFIX' -%}
+            {%- elif 'dovecot' in cmdline -%}
+              {%- set svc_name = 'dovecot' -%}
+              {%- set svc_type = 'MAIL' -%}
+              {%- set tech = 'DOVECOT' -%}
+            {%- elif 'sendmail' in cmdline -%}
+              {%- set svc_name = 'sendmail' -%}
+              {%- set svc_type = 'MAIL' -%}
+              {%- set tech = 'SENDMAIL' -%}
+
+            {# ── Secrets / Service Mesh ── #}
+            {%- elif 'vault' in cmdline and 'server' in cmdline -%}
+              {%- set svc_name = 'hashicorp-vault' -%}
+              {%- set svc_type = 'SECRETS' -%}
+              {%- set tech = 'VAULT' -%}
+              {%- set version = vault_ver[:200] if vault_ver|length > 0 else none -%}
+            {%- elif 'consul' in cmdline -%}
+              {%- set svc_name = 'hashicorp-consul' -%}
+              {%- set svc_type = 'SERVICE_MESH' -%}
+              {%- set tech = 'CONSUL' -%}
+
+            {# ── K8s Control Plane ── #}
+            {%- elif 'kube-apiserver' in cmdline -%}
+              {%- set svc_name = 'kube-apiserver' -%}
+              {%- set svc_type = 'K8S_CONTROL' -%}
+              {%- set tech = 'KUBERNETES' -%}
+            {%- elif 'kube-scheduler' in cmdline -%}
+              {%- set svc_name = 'kube-scheduler' -%}
+              {%- set svc_type = 'K8S_CONTROL' -%}
+              {%- set tech = 'KUBERNETES' -%}
+            {%- elif 'kube-controller' in cmdline -%}
+              {%- set svc_name = 'kube-controller-manager' -%}
+              {%- set svc_type = 'K8S_CONTROL' -%}
+              {%- set tech = 'KUBERNETES' -%}
+            {%- elif 'etcd' in cmdline -%}
+              {%- set svc_name = 'etcd' -%}
+              {%- set svc_type = 'CLUSTER' -%}
+              {%- set tech = 'ETCD' -%}
+            {%- elif 'zookeeper' in cmdline -%}
+              {%- set svc_name = 'zookeeper' -%}
+              {%- set svc_type = 'CLUSTER' -%}
+              {%- set tech = 'ZOOKEEPER' -%}
+
+            {# ── Schedulers ── #}
+            {%- elif 'celery' in cmdline -%}
+              {%- set svc_name = 'celery-worker' -%}
+              {%- set svc_type = 'SCHEDULER' -%}
+              {%- set tech = 'CELERY' -%}
+            {%- elif 'sidekiq' in cmdline -%}
+              {%- set svc_name = 'sidekiq-worker' -%}
+              {%- set svc_type = 'SCHEDULER' -%}
+              {%- set tech = 'SIDEKIQ' -%}
+
+            {# ── NFS / Samba ── #}
+            {%- elif 'nfsd' in cmdline or 'rpc.mountd' in cmdline -%}
+              {%- set svc_name = 'nfs-server' -%}
+              {%- set svc_type = 'STORAGE' -%}
+              {%- set tech = 'NFS' -%}
+            {%- elif 'smbd' in cmdline or 'nmbd' in cmdline -%}
+              {%- set svc_name = 'samba' -%}
+              {%- set svc_type = 'STORAGE' -%}
+              {%- set tech = 'SAMBA' -%}
+            {%- endif -%}
+
+            {# ── Stats comunes ── #}
+            {%- set mem_mb = (rss_kb|float / 1024)|round(2) if rss_kb|length > 0 else none -%}
+            {%- set uptime = none -%}
+            {%- if etime|length > 0 -%}
+              {%- set parts = etime.split('-') -%}
+              {%- set days = parts[0]|int if parts|length == 2 else 0 -%}
+              {%- set hms = parts[-1].split(':') -%}
+              {%- if   hms|length == 3 -%}{%- set uptime = days*86400 + hms[0]|int*3600 + hms[1]|int*60 + hms[2]|int -%}
+              {%- elif hms|length == 2 -%}{%- set uptime = days*86400 + hms[0]|int*60   + hms[1]|int -%}
+              {%- else                 -%}{%- set uptime = hms[0]|int -%}
+              {%- endif -%}
+            {%- endif -%}
+
+            {%- set pid_ports = (svc_disc_rhel_pid_ports | default({}))[pid] | default([]) -%}
+            {%- set protocol = pid_ports[0].get('protocol',none) if pid_ports|length > 0 else none -%}
+            {%- set ports_json = pid_ports|to_json if pid_ports|length > 0 else none -%}
+            {%- set binary = cmdline.split()[0] | default(none) -%}
+
+            {%- if svc_type != 'UNKNOWN' -%}
+              {%- set _ = ns.svcs.append({
+                'service_name': svc_name | truncate(200, true, ''),
+                'service_type': svc_type,
+                'technology': tech,
+                'pid': pid,
+                'running_user': user,
+                'binary_path': binary,
+                'version_detected': version,
+                'uptime_seconds': uptime,
+                'cpu_usage_percent': cpu,
+                'memory_usage_mb': mem_mb,
+                'protocol': protocol,
+                'listening_ports': ports_json,
+                'service_status': 'RUNNING',
+                'severity': svc_disc_rhel_severity_running,
+                'last_state_change_timestamp': none
+              }) -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.svcs }}
+    cacheable: false
+  tags: [discovery, infra]
+
+- name: Svc_disc_rhel | infra | Resumen agentes en {{ inventory_hostname }}
+  ansible.builtin.debug:
+    msg: >-
+      svc_disc_rhel — Detectados {{ svc_disc_rhel_infra_services | default([]) | length }}
+      agente(s)/servicio(s) de infraestructura en {{ inventory_hostname }}.
+  tags: [discovery, infra]

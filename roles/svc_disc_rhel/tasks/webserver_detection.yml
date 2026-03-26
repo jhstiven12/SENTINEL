@@ -1,0 +1,325 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/tasks/webserver_detection.yml
+# Detección profunda de servidores web, proxies reversos y Tomcat standalone
+# que pueden correr fuera de systemd (compilados a mano, contenedores, etc.)
+#
+# Detecta:
+#   - Apache HTTPD (httpd, apache2) — incluye detección de mod_proxy/mod_jk
+#   - Nginx — incluye detección de conf upstream (proxy_pass)
+#   - HAProxy
+#   - Traefik
+#   - Envoy Proxy
+#   - Varnish Cache (reverse proxy / HTTP accelerator)
+#   - Squid (forward/reverse proxy)
+#   - Apache Tomcat standalone (catalina / bootstrap)
+#
+# Variables producidas:
+#   svc_disc_rhel_web_services — lista en formato canónico
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Recolectar procesos web/proxy con ps
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | web | Detectar procesos web y proxy
+  block:
+    - name: Svc_disc_rhel | web | ps — buscar procesos web/proxy
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ps -eo pid,user,pcpu,rss,etime,args --no-headers 2>/dev/null |
+          awk '
+            /\/httpd/      || /\/apache2/     ||
+            /nginx.*master/ || /nginx.*worker/ ||
+            /haproxy/      ||
+            /traefik/      ||
+            /envoy/        ||
+            /varnishd/     ||
+            /squid/        || /\/squid$/      ||
+            /catalina/     || /bootstrap\.jar/ {
+              print $1"|"$2"|"$3"|"$4"|"$5"|"substr($0, index($0,$6))
+            }
+          '
+        executable: /bin/bash
+      register: svc_disc_rhel_web_ps_raw
+      changed_when: false
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery, webserver]
+
+  rescue:
+    - name: Svc_disc_rhel | web | ERROR en ps web
+      ansible.builtin.debug:
+        msg: "[ERROR] svc_disc_rhel — web detect: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, webserver]
+
+  always:
+    - name: Svc_disc_rhel | web | Garantizar svc_disc_rhel_web_ps_raw
+      ansible.builtin.set_fact:
+        svc_disc_rhel_web_ps_raw: "{{ svc_disc_rhel_web_ps_raw | default({'stdout_lines': []}) }}"
+        cacheable: false
+      tags: [discovery, webserver]
+
+# ---------------------------------------------------------------------------
+# 2. Detectar configuración de reverse proxy en Apache y Nginx
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | web | Inspeccionar reverse proxy config
+  block:
+    - name: Svc_disc_rhel | web | Apache — detectar mod_proxy/mod_jk  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          httpd_bin=$(command -v httpd 2>/dev/null || command -v apache2 2>/dev/null || true)
+          if [ -x "$httpd_bin" ]; then
+            mods=$("$httpd_bin" -M 2>/dev/null |
+              grep -Eo 'proxy_module|proxy_http_module|proxy_balancer_module|proxy_ajp_module|jk_module' |
+              sort -u | tr '\n' ',')
+            version=$("$httpd_bin" -v 2>/dev/null | head -1)
+            echo "APACHE_MODS:${mods}|VERSION:${version}"
+          else
+            echo "NO_HTTPD"
+          fi
+        executable: /bin/bash
+      register: svc_disc_rhel_web_apache_info
+      changed_when: false
+      timeout: 10
+      tags: [discovery, webserver]
+
+    - name: Svc_disc_rhel | web | Nginx — detectar upstream/proxy_pass  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          nginx_bin=$(command -v nginx 2>/dev/null || true)
+          if [ -x "$nginx_bin" ]; then
+            has_proxy=$(grep -rl 'proxy_pass\|upstream' /etc/nginx/ 2>/dev/null | head -1)
+            version=$("$nginx_bin" -v 2>&1 | head -1)
+            if [ -n "$has_proxy" ]; then
+              echo "NGINX_REVERSE_PROXY:yes|VERSION:${version}"
+            else
+              echo "NGINX_REVERSE_PROXY:no|VERSION:${version}"
+            fi
+          else
+            echo "NO_NGINX"
+          fi
+        executable: /bin/bash
+      register: svc_disc_rhel_web_nginx_info
+      changed_when: false
+      timeout: 10
+      tags: [discovery, webserver]
+
+  rescue:
+    - name: Svc_disc_rhel | web | WARN en inspección config
+      ansible.builtin.debug:
+        msg: "[WARN] svc_disc_rhel — proxy config inspect: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, webserver]
+
+# ---------------------------------------------------------------------------
+# 3. Obtener versiones de cada servidor (best-effort)
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | web | Detectar versiones
+  block:
+    - name: Svc_disc_rhel | web | Versión HAProxy  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: haproxy -v 2>/dev/null | head -1 || true
+        executable: /bin/bash
+      register: svc_disc_rhel_web_haproxy_ver
+      changed_when: false
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 10
+      tags: [discovery, webserver]
+
+    - name: Svc_disc_rhel | web | Versión Traefik  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: traefik version 2>/dev/null | head -1 || true
+        executable: /bin/bash
+      register: svc_disc_rhel_web_traefik_ver
+      changed_when: false
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 10
+      tags: [discovery, webserver]
+
+    - name: Svc_disc_rhel | web | Versión Envoy  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: envoy --version 2>/dev/null | head -1 || true
+        executable: /bin/bash
+      register: svc_disc_rhel_web_envoy_ver
+      changed_when: false
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 10
+      tags: [discovery, webserver]
+
+    - name: Svc_disc_rhel | web | Versión Varnish  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: varnishd -V 2>&1 | head -1 || true
+        executable: /bin/bash
+      register: svc_disc_rhel_web_varnish_ver
+      changed_when: false
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 10
+      tags: [discovery, webserver]
+
+    - name: Svc_disc_rhel | web | Versión Squid  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: squid -v 2>/dev/null | head -1 || true
+        executable: /bin/bash
+      register: svc_disc_rhel_web_squid_ver
+      changed_when: false
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 10
+      tags: [discovery, webserver]
+
+  rescue:
+    - name: Svc_disc_rhel | web | WARN versiones
+      ansible.builtin.debug:
+        msg: "[WARN] svc_disc_rhel — web version detect"
+      tags: [discovery, webserver]
+
+# ---------------------------------------------------------------------------
+# 4. Normalizar → svc_disc_rhel_web_services
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | web | Construir svc_disc_rhel_web_services
+  ansible.builtin.set_fact:
+    svc_disc_rhel_web_services: >-
+      {%- set ns = namespace(svcs=[], seen_pids=[]) -%}
+      {%- set known = svc_disc_rhel_parsed_services | default([])
+                      | map(attribute='MainPID', default='0')
+                      | map('trim') | list -%}
+
+      {%- set apache_info = svc_disc_rhel_web_apache_info.stdout | default('') -%}
+      {%- set apache_ver = apache_info.split('VERSION:')[1] | default('') | trim
+                            if 'VERSION:' in apache_info else '' -%}
+      {%- set apache_mods = apache_info.split('APACHE_MODS:')[1].split('|')[0] | default('')
+                            if 'APACHE_MODS:' in apache_info else '' -%}
+      {%- set apache_is_rp = 'proxy_module' in apache_mods or 'jk_module' in apache_mods -%}
+
+      {%- set nginx_info = svc_disc_rhel_web_nginx_info.stdout | default('') -%}
+      {%- set nginx_ver = nginx_info.split('VERSION:')[1] | default('') | trim
+                             if 'VERSION:' in nginx_info else '' -%}
+      {%- set nginx_is_rp = 'yes' in nginx_info -%}
+
+      {%- set haproxy_ver = svc_disc_rhel_web_haproxy_ver.stdout | default('') | trim -%}
+      {%- set traefik_ver = svc_disc_rhel_web_traefik_ver.stdout | default('') | trim -%}
+      {%- set envoy_ver = svc_disc_rhel_web_envoy_ver.stdout | default('') | trim -%}
+      {%- set varnish_ver = svc_disc_rhel_web_varnish_ver.stdout | default('') | trim -%}
+      {%- set squid_ver = svc_disc_rhel_web_squid_ver.stdout | default('') | trim -%}
+
+      {%- for line in svc_disc_rhel_web_ps_raw.stdout_lines | default([]) -%}
+        {%- set cols = line.split('|') -%}
+        {%- if cols|length >= 6 -%}
+          {%- set pid = cols[0]|trim -%}
+          {%- set user = cols[1]|trim -%}
+          {%- set cpu = cols[2]|trim -%}
+          {%- set rss_kb = cols[3]|trim -%}
+          {%- set etime = cols[4]|trim -%}
+          {%- set cmdline = cols[5:]|join('|')|trim -%}
+
+          {%- if pid not in known and pid not in ns.seen_pids -%}
+            {%- set _ = ns.seen_pids.append(pid) -%}
+
+            {%- set svc_name = 'web-process-' ~ pid -%}
+            {%- set svc_type = 'WEB_SERVER' -%}
+            {%- set tech = 'UNKNOWN' -%}
+            {%- set version = none -%}
+
+            {%- if '/httpd' in cmdline or '/apache2' in cmdline -%}
+              {%- if apache_is_rp -%}
+                {%- set svc_name = 'apache-reverse-proxy' -%}
+                {%- set svc_type = 'REVERSE_PROXY' -%}
+              {%- else -%}
+                {%- set svc_name = 'apache-httpd' -%}
+              {%- endif -%}
+              {%- set tech = 'APACHE' -%}
+              {%- set version = apache_ver[:200] if apache_ver|length > 0 else none -%}
+
+            {%- elif 'nginx' in cmdline -%}
+              {%- if nginx_is_rp -%}
+                {%- set svc_name = 'nginx-reverse-proxy' -%}
+                {%- set svc_type = 'REVERSE_PROXY' -%}
+              {%- else -%}
+                {%- set svc_name = 'nginx' -%}
+              {%- endif -%}
+              {%- set tech = 'NGINX' -%}
+              {%- set version = nginx_ver[:200] if nginx_ver|length > 0 else none -%}
+
+            {%- elif 'haproxy' in cmdline -%}
+              {%- set svc_name = 'haproxy' -%}
+              {%- set svc_type = 'REVERSE_PROXY' -%}
+              {%- set tech = 'HAPROXY' -%}
+              {%- set version = haproxy_ver[:200] if haproxy_ver|length > 0 else none -%}
+
+            {%- elif 'traefik' in cmdline -%}
+              {%- set svc_name = 'traefik' -%}
+              {%- set svc_type = 'REVERSE_PROXY' -%}
+              {%- set tech = 'TRAEFIK' -%}
+              {%- set version = traefik_ver[:200] if traefik_ver|length > 0 else none -%}
+
+            {%- elif 'envoy' in cmdline -%}
+              {%- set svc_name = 'envoy-proxy' -%}
+              {%- set svc_type = 'REVERSE_PROXY' -%}
+              {%- set tech = 'ENVOY' -%}
+              {%- set version = envoy_ver[:200] if envoy_ver|length > 0 else none -%}
+
+            {%- elif 'varnishd' in cmdline -%}
+              {%- set svc_name = 'varnish' -%}
+              {%- set svc_type = 'REVERSE_PROXY' -%}
+              {%- set tech = 'VARNISH' -%}
+              {%- set version = varnish_ver[:200] if varnish_ver|length > 0 else none -%}
+
+            {%- elif 'squid' in cmdline -%}
+              {%- set svc_name = 'squid-proxy' -%}
+              {%- set svc_type = 'REVERSE_PROXY' -%}
+              {%- set tech = 'SQUID' -%}
+              {%- set version = squid_ver[:200] if squid_ver|length > 0 else none -%}
+
+            {%- elif 'catalina' in cmdline or 'bootstrap.jar' in cmdline -%}
+              {%- set svc_name = 'tomcat-standalone' -%}
+              {%- set svc_type = 'APP_SERVER' -%}
+              {%- set tech = 'TOMCAT' -%}
+            {%- endif -%}
+
+            {%- set mem_mb = (rss_kb|float / 1024)|round(2) if rss_kb|length > 0 else none -%}
+            {%- set uptime = none -%}
+            {%- if etime|length > 0 -%}
+              {%- set parts = etime.split('-') -%}
+              {%- set days = parts[0]|int if parts|length == 2 else 0 -%}
+              {%- set hms = parts[-1].split(':') -%}
+              {%- if   hms|length == 3 -%}{%- set uptime = days*86400 + hms[0]|int*3600 + hms[1]|int*60 + hms[2]|int -%}
+              {%- elif hms|length == 2 -%}{%- set uptime = days*86400 + hms[0]|int*60   + hms[1]|int -%}
+              {%- else                 -%}{%- set uptime = hms[0]|int -%}
+              {%- endif -%}
+            {%- endif -%}
+
+            {%- set pid_ports = (svc_disc_rhel_pid_ports | default({}))[pid] | default([]) -%}
+            {%- set protocol = pid_ports[0].get('protocol',none) if pid_ports|length > 0 else none -%}
+            {%- set ports_json = pid_ports|to_json if pid_ports|length > 0 else none -%}
+            {%- set binary = cmdline.split()[0] | default(none) -%}
+
+            {%- set _ = ns.svcs.append({
+              'service_name': svc_name | truncate(200, true, ''),
+              'service_type': svc_type,
+              'technology': tech,
+              'pid': pid,
+              'running_user': user,
+              'binary_path': binary,
+              'version_detected': version,
+              'uptime_seconds': uptime,
+              'cpu_usage_percent': cpu,
+              'memory_usage_mb': mem_mb,
+              'protocol': protocol,
+              'listening_ports': ports_json,
+              'service_status': 'RUNNING',
+              'severity': svc_disc_rhel_severity_running,
+              'last_state_change_timestamp': none
+            }) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.svcs }}
+    cacheable: false
+  tags: [discovery, webserver]
+
+- name: Svc_disc_rhel | web | Resumen en {{ inventory_hostname }}
+  ansible.builtin.debug:
+    msg: >-
+      svc_disc_rhel — Detectados {{ svc_disc_rhel_web_services | default([]) | length }}
+      proceso(s) web/proxy adicional(es) en {{ inventory_hostname }}.
+  tags: [discovery, webserver]

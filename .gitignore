@@ -1,0 +1,45 @@
+# Ansible
+*.retry
+.ansible/
+collections/
+
+# Credenciales y vault — NUNCA commitear
+*vault*.yml
+*secrets*.yml
+*.vault
+.vault_pass
+vault_pass.txt
+*password*
+*credentials*
+
+# Variables con datos reales (usar vars/main.yml.example como plantilla)
+roles/*/vars/main.yml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.eggs/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs y temporales
+*.log
+*.tmp
+*.bak
+
+# ansible-navigator artefactos
+.cache/
+artifacts/

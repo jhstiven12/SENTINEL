@@ -1,0 +1,170 @@
+---
+# =============================================================================
+# roles/svc_disc_win/tasks/normalize.yml
+# Fusiona TODAS las fuentes y deduplica por PID y por service_name.
+#
+# Prioridad (la primera gana si hay colisión de PID):
+#   1. win32_service  2. db  3. java  4. web  5. pm2  6. infra  7. docker
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Normalizar Win32_Service (fuente primaria)
+# ---------------------------------------------------------------------------
+- name: Svc_disc_win | normalize | Construir lista Win32_Service normalizada
+  ansible.builtin.set_fact:
+    svc_disc_win_win_normalized: >-
+      {%- set ns = namespace(svcs=[]) -%}
+      {%- for svc in svc_disc_win_services | default([]) -%}
+
+        {%- set svc_name     = svc.ServiceName | default('unknown') -%}
+        {%- set display_name = svc.DisplayName | default(svc_name) -%}
+
+        {%- set matched = [] -%}
+        {%- for entry in svc_disc_win_technology_map -%}
+          {%- if (entry.keyword | lower in svc_name | lower
+                  or entry.keyword | lower in display_name | lower)
+                 and matched | length == 0 -%}
+            {%- set _ = matched.append(entry) -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {%- set tech = matched[0] if matched | length > 0
+                       else {'service_type': svc_disc_win_default_service_type,
+                             'technology': svc_disc_win_default_technology} -%}
+
+        {%- set pid_int = svc.ProcessId | default(0) | int -%}
+        {%- set pid_key = svc.ProcessId | string if pid_int > 0 else none -%}
+
+        {%- set pid_ports  = (svc_disc_win_pid_ports | default({}))[pid_key] | default([]) if pid_key else [] -%}
+        {%- set protocol   = pid_ports[0].get('protocol', none) if pid_ports | length > 0 else none -%}
+        {%- set ports_json = pid_ports | to_json if pid_ports | length > 0 else none -%}
+
+        {%- set uptime = (svc_disc_win_uptime_map | default({}))[pid_key] | default(none)
+                         if pid_key else none -%}
+
+        {%- set raw_path = (svc.PathName | default('') | regex_replace('"', '')).split(' ')[0] -%}
+        {%- set binary   = raw_path if raw_path | length > 0 else none -%}
+
+        {%- set svc_status = 'RUNNING' if svc.State | default('') | lower == 'running' else 'STOPPED' -%}
+        {%- set severity   = svc_disc_win_severity_running
+                             if svc_status == 'RUNNING' else svc_disc_win_severity_stopped -%}
+
+        {%- set _ = ns.svcs.append({
+          'service_name': svc_name | truncate(200, true, ''),
+          'service_type': tech.service_type,
+          'technology': tech.technology,
+          'pid': pid_key,
+          'running_user': svc.StartName | default(none),
+          'binary_path': binary,
+          'version_detected': (svc_disc_win_ver_map | default({}))[svc_name] | default(none),
+          'uptime_seconds': uptime,
+          'cpu_usage_percent': svc.CPUUsage | default(none),
+          'memory_usage_mb': svc.MemoryMB | default(none),
+          'protocol': protocol,
+          'listening_ports': ports_json,
+          'service_status': svc_status,
+          'severity': severity,
+          'last_state_change_timestamp': none,
+          '_source': 'win32',
+          '_priority': 1
+        }) -%}
+
+      {%- endfor -%}
+      {{ ns.svcs }}
+    cacheable: false
+  tags: [discovery, services]
+
+# ---------------------------------------------------------------------------
+# 2. Concatenar todas las fuentes con prioridad
+# ---------------------------------------------------------------------------
+- name: Svc_disc_win | normalize | Concatenar todas las fuentes con metadatos de prioridad
+  ansible.builtin.set_fact:
+    svc_disc_win_all_raw: >-
+      {%- set ns = namespace(all=[]) -%}
+      {%- for s in svc_disc_win_win_normalized | default([]) -%}
+        {%- set _ = ns.all.append(s) -%}
+      {%- endfor -%}
+      {%- for s in svc_disc_win_db_services | default([]) -%}
+        {%- set _ = ns.all.append(s | combine({'_source': 'db', '_priority': 2})) -%}
+      {%- endfor -%}
+      {%- for s in svc_disc_win_java_services | default([]) -%}
+        {%- set _ = ns.all.append(s | combine({'_source': 'java', '_priority': 3})) -%}
+      {%- endfor -%}
+      {%- for s in svc_disc_win_web_services | default([]) -%}
+        {%- set _ = ns.all.append(s | combine({'_source': 'web', '_priority': 4})) -%}
+      {%- endfor -%}
+      {%- for s in svc_disc_win_pm2_services | default([]) -%}
+        {%- set _ = ns.all.append(s | combine({'_source': 'pm2', '_priority': 5})) -%}
+      {%- endfor -%}
+      {%- for s in svc_disc_win_infra_services | default([]) -%}
+        {%- set _ = ns.all.append(s | combine({'_source': 'infra', '_priority': 6})) -%}
+      {%- endfor -%}
+      {%- for s in svc_disc_win_docker_services | default([]) -%}
+        {%- set _ = ns.all.append(s | combine({'_source': 'docker', '_priority': 7})) -%}
+      {%- endfor -%}
+      {{ ns.all }}
+    cacheable: false
+  tags: [discovery]
+
+# ---------------------------------------------------------------------------
+# 3. Deduplicar — Paso 1: por PID, Paso 2: por service_name
+# ---------------------------------------------------------------------------
+- name: Svc_disc_win | normalize | Deduplicar y generar svc_disc_win_sentinel_services
+  ansible.builtin.set_fact:
+    svc_disc_win_sentinel_services: >-
+      {%- set ns = namespace(by_pid={}, by_name={}, final=[]) -%}
+
+      {%- for s in svc_disc_win_all_raw | default([]) -%}
+        {%- set pid = s.pid | default(none) | string -%}
+        {%- if pid and pid != 'None' and pid != '0' -%}
+          {%- if pid not in ns.by_pid
+                 or s.get('_priority', 99) | int < ns.by_pid[pid].get('_priority', 99) | int -%}
+            {%- set _ = ns.by_pid.update({pid: s}) -%}
+          {%- endif -%}
+        {%- else -%}
+          {%- set _ = ns.final.append(s) -%}
+        {%- endif -%}
+      {%- endfor -%}
+
+      {%- for pid, s in ns.by_pid.items() -%}
+        {%- set _ = ns.final.append(s) -%}
+      {%- endfor -%}
+
+      {%- for s in ns.final -%}
+        {%- set name = s.service_name -%}
+        {%- if name not in ns.by_name
+               or s.get('_priority', 99) | int < ns.by_name[name].get('_priority', 99) | int -%}
+          {%- set _ = ns.by_name.update({name: s}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+
+      {%- set clean = [] -%}
+      {%- for name, s in ns.by_name.items() -%}
+        {%- set cleaned = {} -%}
+        {%- for k, v in s.items() -%}
+          {%- if not k.startswith('_') -%}
+            {%- set _ = cleaned.update({k: v}) -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {%- set _ = clean.append(cleaned) -%}
+      {%- endfor -%}
+      {{ clean }}
+    cacheable: false
+  tags: [discovery, services, java, pm2, database, webserver, docker, infra]
+
+# ---------------------------------------------------------------------------
+# 4. Resumen con métricas de deduplicación
+# ---------------------------------------------------------------------------
+- name: Svc_disc_win | normalize | Resumen total en {{ inventory_hostname }}
+  ansible.builtin.debug:
+    msg: >-
+      svc_disc_win — Fuentes: {{ svc_disc_win_all_raw | default([]) | length }} brutos →
+      Deduplicados: {{ svc_disc_win_sentinel_services | length }} únicos
+      (win32: {{ svc_disc_win_win_normalized | default([]) | length }},
+       java: {{ svc_disc_win_java_services | default([]) | length }},
+       pm2: {{ svc_disc_win_pm2_services | default([]) | length }},
+       db: {{ svc_disc_win_db_services | default([]) | length }},
+       web: {{ svc_disc_win_web_services | default([]) | length }},
+       docker: {{ svc_disc_win_docker_services | default([]) | length }},
+       infra: {{ svc_disc_win_infra_services | default([]) | length }})
+      en {{ inventory_hostname }}.
+  tags: [discovery]

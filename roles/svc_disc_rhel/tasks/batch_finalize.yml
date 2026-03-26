@@ -1,0 +1,26 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/tasks/batch_finalize.yml
+# =============================================================================
+
+- name: Svc_disc_rhel | Batch_finalize | UPDATE OBS_BATCH_EXECUTION — TOTAL_SERVERS
+  opitzconsulting.ansible_oracle.oracle_sql:
+    hostname: "{{ svc_disc_rhel_oracle_host }}"
+    port: "{{ svc_disc_rhel_oracle_port }}"
+    service_name: "{{ svc_disc_rhel_oracle_service }}"
+    username: "{{ svc_disc_rhel_oracle_user }}"
+    password: "{{ svc_disc_rhel_oracle_password }}"
+    mode: "sysdba"
+    sql: >-
+      UPDATE {{ svc_disc_rhel_oracle_schema }}.OBS_BATCH_EXECUTION
+      SET TOTAL_SERVERS = {{ ansible_play_hosts | length }}
+      WHERE BATCH_ID = '{{ svc_disc_rhel_batch_id }}'
+  environment:
+    ORACLE_HOME: /opt/oracle/instantclient
+    LD_LIBRARY_PATH: /opt/oracle/instantclient
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  no_log: false
+  run_once: true
+  delegate_to: "{{ svc_disc_rhel_oracle_db_node }}"
+  tags: [batch, oracle_insert]

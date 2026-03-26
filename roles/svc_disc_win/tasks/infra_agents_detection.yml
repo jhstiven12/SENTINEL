@@ -1,0 +1,260 @@
+---
+# =============================================================================
+# roles/svc_disc_win/tasks/infra_agents_detection.yml
+# Detección de agentes de seguridad, monitoreo e infraestructura en Windows
+# que pueden correr como procesos fuera de Win32_Service.
+#
+# Variables producidas:
+#   svc_disc_win_infra_services — lista en formato canónico
+# =============================================================================
+
+- name: Svc_disc_win | infra | Detectar agentes y servicios de infraestructura
+  block:
+    - name: Svc_disc_win | infra | Get-WmiObject Win32_Process — agentes infra
+      ansible.windows.win_shell:
+        _raw_params: |
+          $knownPids = @(
+            Get-WmiObject Win32_Service -ErrorAction SilentlyContinue |
+              Where-Object { $_.State -eq 'Running' } |
+              Select-Object -ExpandProperty ProcessId
+          )
+          $patterns = @(
+            # Security agents
+            'splunkd', 'SplunkForwarder', 'splunkd.exe',
+            'QualysAgent', 'qualys-cloud',
+            'CSFalconService', 'CSFalconContainer',
+            'ossec', 'wazuh',
+            'clamd', 'freshclam',
+            # Monitoring
+            'zabbix_agentd', 'zabbix_agent2',
+            'node_exporter', 'windows_exporter', 'wmi_exporter',
+            'prometheus', 'alertmanager', 'grafana-server',
+            'telegraf', 'datadog-agent',
+            'filebeat', 'metricbeat', 'winlogbeat',
+            'fluentd', 'fluent-bit',
+            'nscp', 'nsclient',
+            'snmpd',
+            # DNS
+            'named', 'unbound', 'coredns',
+            # Secrets
+            'vault', 'consul',
+            # K8s
+            'kube-apiserver', 'kube-scheduler', 'kube-controller',
+            'etcd',
+            # Cluster
+            'zookeeper'
+          )
+          $r = @()
+          Get-WmiObject Win32_Process -ErrorAction SilentlyContinue | ForEach-Object {
+            $pname = $_.Name.ToLower()
+            $match = $false
+            foreach ($p in $patterns) {
+              if ($pname -like "*$($p.ToLower())*") { $match = $true; break }
+            }
+            if ($match -and $_.ProcessId -notin $knownPids -and $_.ProcessId -gt 0) {
+              $proc = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+              $cpu = $null; $memMB = $null; $uptime = $null
+              if ($proc) {
+                $cpu   = [math]::Round($proc.CPU, 2)
+                $memMB = [math]::Round($proc.WorkingSet64 / 1MB, 2)
+                try { $uptime = [int]((Get-Date) - $proc.StartTime).TotalSeconds } catch {}
+              }
+              $version = $null
+              $exePath = ($_.ExecutablePath -replace '"','')
+              if ($exePath -and (Test-Path $exePath -ErrorAction SilentlyContinue)) {
+                try { $version = (Get-Item $exePath).VersionInfo.ProductVersion } catch {}
+              }
+              $owner = $null
+              try { $owner = $_.GetOwner().User } catch {}
+              $r += [PSCustomObject]@{
+                PID         = $_.ProcessId
+                ProcessName = $_.Name
+                CommandLine = $_.CommandLine
+                ExePath     = $exePath
+                User        = $owner
+                CPUUsage    = $cpu
+                MemoryMB    = $memMB
+                Uptime      = $uptime
+                Version     = $version
+              }
+            }
+          }
+          if ($r.Count -gt 0) { $r | ConvertTo-Json -Depth 3 -Compress }
+          else { Write-Output "[]" }
+      register: svc_disc_win_infra_raw
+      changed_when: false
+      timeout: "{{ svc_disc_win_discovery_timeout }}"
+      tags: [discovery, infra]
+
+  rescue:
+    - name: Svc_disc_win | infra | ERROR en detección infra
+      ansible.builtin.debug:
+        msg: "[ERROR] svc_disc_win — infra detect: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, infra]
+
+  always:
+    - name: Svc_disc_win | infra | Garantizar svc_disc_win_infra_raw
+      ansible.builtin.set_fact:
+        svc_disc_win_infra_raw: "{{ svc_disc_win_infra_raw | default({'stdout': '[]'}) }}"
+        cacheable: false
+      tags: [discovery, infra]
+
+# ---------------------------------------------------------------------------
+# Normalizar → svc_disc_win_infra_services
+# ---------------------------------------------------------------------------
+- name: Svc_disc_win | infra | Construir svc_disc_win_infra_services
+  ansible.builtin.set_fact:
+    svc_disc_win_infra_services: >-
+      {%- set ns = namespace(svcs=[]) -%}
+      {%- set raw = (svc_disc_win_infra_raw.stdout | default('[]') | trim | from_json)
+                    if (svc_disc_win_infra_raw.stdout | default('') | trim | length > 2) else [] -%}
+      {%- for proc in raw -%}
+        {%- set pid     = proc.PID | string -%}
+        {%- set pname   = proc.ProcessName | default('') | lower -%}
+        {%- set cmdline = proc.CommandLine | default('') | lower -%}
+
+        {%- set svc_name = 'infra-' ~ pid -%}
+        {%- set svc_type = 'UNKNOWN' -%}
+        {%- set tech     = 'UNKNOWN' -%}
+
+        {# ── Security ── #}
+        {%- if 'splunk' in pname -%}
+          {%- set svc_name = 'splunk-forwarder' -%}
+          {%- set svc_type = 'SECURITY_AGENT' -%}
+          {%- set tech     = 'SPLUNK_FORWARDER' -%}
+        {%- elif 'qualys' in pname -%}
+          {%- set svc_name = 'qualys-agent' -%}
+          {%- set svc_type = 'SECURITY_AGENT' -%}
+          {%- set tech     = 'QUALYS' -%}
+        {%- elif 'falcon' in pname or 'csfalcon' in pname -%}
+          {%- set svc_name = 'crowdstrike-falcon' -%}
+          {%- set svc_type = 'SECURITY_AGENT' -%}
+          {%- set tech     = 'CROWDSTRIKE' -%}
+        {%- elif 'ossec' in pname -%}
+          {%- set svc_name = 'ossec-agent' -%}
+          {%- set svc_type = 'SECURITY_AGENT' -%}
+          {%- set tech     = 'OSSEC' -%}
+        {%- elif 'wazuh' in pname -%}
+          {%- set svc_name = 'wazuh-agent' -%}
+          {%- set svc_type = 'SECURITY_AGENT' -%}
+          {%- set tech     = 'WAZUH' -%}
+        {%- elif 'clamd' in pname or 'freshclam' in pname -%}
+          {%- set svc_name = 'clamav' -%}
+          {%- set svc_type = 'SECURITY_AGENT' -%}
+          {%- set tech     = 'CLAMAV' -%}
+
+        {# ── Monitoring ── #}
+        {%- elif 'zabbix' in pname -%}
+          {%- set svc_name = 'zabbix-agent' -%}
+          {%- set svc_type = 'MONITORING_AGENT' -%}
+          {%- set tech     = 'ZABBIX' -%}
+        {%- elif 'windows_exporter' in pname or 'wmi_exporter' in pname or 'node_exporter' in pname -%}
+          {%- set svc_name = 'windows-exporter' -%}
+          {%- set svc_type = 'MONITORING_AGENT' -%}
+          {%- set tech     = 'PROMETHEUS' -%}
+        {%- elif 'prometheus' in pname -%}
+          {%- set svc_name = 'prometheus-server' -%}
+          {%- set svc_type = 'MONITORING' -%}
+          {%- set tech     = 'PROMETHEUS' -%}
+        {%- elif 'alertmanager' in pname -%}
+          {%- set svc_name = 'alertmanager' -%}
+          {%- set svc_type = 'MONITORING' -%}
+          {%- set tech     = 'PROMETHEUS' -%}
+        {%- elif 'grafana' in pname -%}
+          {%- set svc_name = 'grafana' -%}
+          {%- set svc_type = 'MONITORING' -%}
+          {%- set tech     = 'GRAFANA' -%}
+        {%- elif 'telegraf' in pname -%}
+          {%- set svc_name = 'telegraf' -%}
+          {%- set svc_type = 'MONITORING_AGENT' -%}
+          {%- set tech     = 'TELEGRAF' -%}
+        {%- elif 'datadog' in pname -%}
+          {%- set svc_name = 'datadog-agent' -%}
+          {%- set svc_type = 'MONITORING_AGENT' -%}
+          {%- set tech     = 'DATADOG' -%}
+        {%- elif 'filebeat' in pname -%}
+          {%- set svc_name = 'filebeat' -%}
+          {%- set svc_type = 'LOG_SHIPPER' -%}
+          {%- set tech     = 'ELASTIC_BEATS' -%}
+        {%- elif 'metricbeat' in pname -%}
+          {%- set svc_name = 'metricbeat' -%}
+          {%- set svc_type = 'MONITORING_AGENT' -%}
+          {%- set tech     = 'ELASTIC_BEATS' -%}
+        {%- elif 'winlogbeat' in pname -%}
+          {%- set svc_name = 'winlogbeat' -%}
+          {%- set svc_type = 'LOG_SHIPPER' -%}
+          {%- set tech     = 'ELASTIC_BEATS' -%}
+        {%- elif 'fluentd' in pname -%}
+          {%- set svc_name = 'fluentd' -%}
+          {%- set svc_type = 'LOG_SHIPPER' -%}
+          {%- set tech     = 'FLUENTD' -%}
+        {%- elif 'fluent-bit' in pname -%}
+          {%- set svc_name = 'fluent-bit' -%}
+          {%- set svc_type = 'LOG_SHIPPER' -%}
+          {%- set tech     = 'FLUENT_BIT' -%}
+        {%- elif 'nscp' in pname or 'nsclient' in pname -%}
+          {%- set svc_name = 'nsclient' -%}
+          {%- set svc_type = 'MONITORING_AGENT' -%}
+          {%- set tech     = 'NAGIOS' -%}
+        {%- elif 'snmpd' in pname -%}
+          {%- set svc_name = 'snmpd' -%}
+          {%- set svc_type = 'MONITORING_AGENT' -%}
+          {%- set tech     = 'SNMP' -%}
+
+        {# ── DNS / Secrets / K8s / Cluster ── #}
+        {%- elif 'coredns' in pname -%}
+          {%- set svc_name = 'coredns' -%}
+          {%- set svc_type = 'DNS' -%}
+          {%- set tech     = 'COREDNS' -%}
+        {%- elif 'vault' in pname -%}
+          {%- set svc_name = 'hashicorp-vault' -%}
+          {%- set svc_type = 'SECRETS' -%}
+          {%- set tech     = 'VAULT' -%}
+        {%- elif 'consul' in pname -%}
+          {%- set svc_name = 'hashicorp-consul' -%}
+          {%- set svc_type = 'SERVICE_MESH' -%}
+          {%- set tech     = 'CONSUL' -%}
+        {%- elif 'etcd' in pname -%}
+          {%- set svc_name = 'etcd' -%}
+          {%- set svc_type = 'CLUSTER' -%}
+          {%- set tech     = 'ETCD' -%}
+        {%- elif 'zookeeper' in pname -%}
+          {%- set svc_name = 'zookeeper' -%}
+          {%- set svc_type = 'CLUSTER' -%}
+          {%- set tech     = 'ZOOKEEPER' -%}
+        {%- endif -%}
+
+        {%- set pid_ports  = (svc_disc_win_pid_ports | default({}))[pid] | default([]) -%}
+        {%- set protocol   = pid_ports[0].get('protocol', none) if pid_ports | length > 0 else none -%}
+        {%- set ports_json = pid_ports | to_json if pid_ports | length > 0 else none -%}
+
+        {%- if svc_type != 'UNKNOWN' -%}
+          {%- set _ = ns.svcs.append({
+            'service_name': svc_name | truncate(200, true, ''),
+            'service_type': svc_type,
+            'technology': tech,
+            'pid': pid,
+            'running_user': proc.User | default(none),
+            'binary_path': proc.ExePath | default(none),
+            'version_detected': proc.Version | default(none),
+            'uptime_seconds': proc.Uptime | default(none),
+            'cpu_usage_percent': proc.CPUUsage | default(none),
+            'memory_usage_mb': proc.MemoryMB | default(none),
+            'protocol': protocol,
+            'listening_ports': ports_json,
+            'service_status': 'RUNNING',
+            'severity': svc_disc_win_severity_running,
+            'last_state_change_timestamp': none
+          }) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.svcs }}
+    cacheable: false
+  tags: [discovery, infra]
+
+- name: Svc_disc_win | infra | Resumen agentes en {{ inventory_hostname }}
+  ansible.builtin.debug:
+    msg: >-
+      svc_disc_win — Detectados {{ svc_disc_win_infra_services | default([]) | length }}
+      agente(s)/servicio(s) de infraestructura en {{ inventory_hostname }}.
+  tags: [discovery, infra]

@@ -1,0 +1,155 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/tasks/services.yml
+# Variables producidas:
+#   svc_disc_rhel_parsed_services  — lista de dicts de systemctl show
+#   svc_disc_rhel_ps_map           — dict { pid: {user, cpu_pct, rss_kb, etime} }
+#   svc_disc_rhel_ver_map          — dict { service_id: version_string }
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Listar servicios running
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | Services | Listar unidades en estado running
+  block:
+    - name: Svc_disc_rhel | Services | Systemctl list-units --state=running
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          systemctl list-units --type=service --state=running
+          --no-legend --no-pager --plain 2>/dev/null | awk '{print $1}'
+      register: svc_disc_rhel_units_raw
+      changed_when: false
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery, services]
+
+    - name: Svc_disc_rhel | Services | Filtrar svc_disc_rhel_excluded_services
+      ansible.builtin.set_fact:
+        svc_disc_rhel_active_services: >-
+          {{
+            svc_disc_rhel_units_raw.stdout_lines
+            | reject('in', svc_disc_rhel_excluded_services)
+            | list
+          }}
+        cacheable: false
+      tags: [discovery, services]
+
+  rescue:
+    - name: Svc_disc_rhel | Services | ERROR en systemctl list-units
+      ansible.builtin.debug:
+        msg: "[ERROR] svc_disc_rhel — systemctl list-units falló: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, services]
+
+  always:
+    - name: Svc_disc_rhel | Services | Garantizar svc_disc_rhel_active_services
+      ansible.builtin.set_fact:
+        svc_disc_rhel_active_services: "{{ svc_disc_rhel_active_services | default([]) }}"
+        cacheable: false
+      tags: [discovery, services]
+
+# ---------------------------------------------------------------------------
+# 2. systemctl show por servicio
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | Services | Systemctl show por cada servicio  # noqa: command-instead-of-module
+  ansible.builtin.shell:
+    cmd: >
+      systemctl show {{ item | quote }}
+      --property=Id,MainPID,ExecStart,ActiveState,SubState,ActiveEnterTimestamp
+      --no-pager 2>/dev/null
+  register: svc_disc_rhel_detail_raw
+  changed_when: false
+  loop: "{{ svc_disc_rhel_active_services }}"
+  loop_control:
+    label: "{{ item }}"
+  timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+  tags: [discovery, services]
+
+- name: Svc_disc_rhel | Services | Parsear systemctl show → svc_disc_rhel_parsed_services
+  ansible.builtin.set_fact:
+    svc_disc_rhel_parsed_services: >-
+      {%- set ns = namespace(result=[]) -%}
+      {%- for r in svc_disc_rhel_detail_raw.results -%}
+        {%- if r.stdout is defined and r.stdout | length > 0 -%}
+          {%- set svc = {} -%}
+          {%- for line in r.stdout_lines -%}
+            {%- set kv = line.split('=', 1) -%}
+            {%- if kv | length == 2 -%}{%- set _ = svc.update({kv[0]: kv[1]}) -%}{%- endif -%}
+          {%- endfor -%}
+          {%- set _ = ns.result.append(svc) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.result }}
+    cacheable: false
+  tags: [discovery, services]
+
+# ---------------------------------------------------------------------------
+# 3. ps en bloque para todos los PIDs
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | Services | Extraer svc_disc_rhel_all_pids de servicios
+  ansible.builtin.set_fact:
+    svc_disc_rhel_all_pids: >-
+      {{
+        svc_disc_rhel_parsed_services
+        | map(attribute='MainPID', default='0') | map('trim')
+        | reject('eq', '0') | reject('eq', '')
+        | list | unique
+      }}
+    cacheable: false
+  tags: [discovery, services]
+
+- name: Svc_disc_rhel | Services | Ps bulk para svc_disc_rhel_all_pids
+  ansible.builtin.shell:
+    cmd: >
+      ps -p {{ svc_disc_rhel_all_pids | join(',') }}
+      -o pid=,user=,pcpu=,rss=,etime= --no-headers 2>/dev/null || true
+  register: svc_disc_rhel_ps_bulk_raw
+  changed_when: false
+  when: svc_disc_rhel_all_pids | length > 0
+  timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+  tags: [discovery, services]
+
+- name: Svc_disc_rhel | Services | Construir svc_disc_rhel_ps_map
+  ansible.builtin.set_fact:
+    svc_disc_rhel_ps_map: >-
+      {%- set ns = namespace(r={}) -%}
+      {%- for line in (svc_disc_rhel_ps_bulk_raw.stdout_lines | default([])) -%}
+        {%- set f = line.split() -%}
+        {%- if f|length >= 5 -%}
+          {%- set _ = ns.r.update({
+              f[0]: {'user':f[1],'cpu_pct':f[2],'rss_kb':f[3],'etime':f[4]}}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.r }}
+    cacheable: false
+  tags: [discovery, services]
+
+# ---------------------------------------------------------------------------
+# 4. Detección de versión de binario (best-effort)
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | Services | Detectar versión de binario por servicio
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      bin="{{ (item.get('ExecStart', '') | trim).split()[0] | default('') }}";
+      [ -x "$bin" ] && "$bin" --version 2>&1 | head -1 || true
+  register: svc_disc_rhel_ver_raw
+  changed_when: false
+  loop: "{{ svc_disc_rhel_parsed_services }}"
+  loop_control:
+    label: "{{ item.get('Id', 'unknown') }}"
+  ignore_errors: true   # noqa: ignore-errors — best-effort
+  timeout: 10
+  tags: [discovery, services]
+
+- name: Svc_disc_rhel | Services | Construir svc_disc_rhel_ver_map
+  ansible.builtin.set_fact:
+    svc_disc_rhel_ver_map: >-
+      {%- set ns = namespace(r={}) -%}
+      {%- for r in svc_disc_rhel_ver_raw.results -%}
+        {%- set sid = r.item.get('Id', '') -%}
+        {%- set ver = r.stdout | default('') | trim -%}
+        {%- if sid and ver -%}{%- set _ = ns.r.update({sid: ver[:200]}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ ns.r }}
+    cacheable: false
+  tags: [discovery, services]

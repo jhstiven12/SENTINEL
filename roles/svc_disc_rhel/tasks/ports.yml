@@ -1,0 +1,106 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/tasks/ports.yml
+# Variables producidas:
+#   svc_disc_rhel_pid_ports — dict { "PID": [{protocol, port}, ...] }
+#
+# RHEL 8/9/10 → ss  |  RHEL 7 → netstat
+# =============================================================================
+
+- name: Svc_disc_rhel | Ports | Recolectar con ss (RHEL 8+)
+  when: ansible_distribution_major_version | int >= 8
+  tags: [discovery]
+  block:
+    - name: Svc_disc_rhel | Ports | Ss TCP
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ss -tlnp 2>/dev/null |
+          awk 'NR>1 && /LISTEN/ {
+            port=$4; sub(/.*:/,"",port);
+            pid=$6;  gsub(/.*pid=|,.*/,"",pid);
+            if(pid!="" && port!="") print "TCP:"port":"pid
+          }'
+      register: svc_disc_rhel_ss_tcp
+      changed_when: false
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery]
+
+    - name: Svc_disc_rhel | Ports | Ss UDP
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ss -ulnp 2>/dev/null |
+          awk 'NR>1 {
+            port=$4; sub(/.*:/,"",port);
+            pid=$5;  gsub(/.*pid=|,.*/,"",pid);
+            if(pid!="" && port!="") print "UDP:"port":"pid
+          }'
+      register: svc_disc_rhel_ss_udp
+      changed_when: false
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery]
+
+- name: Svc_disc_rhel | Ports | Recolectar con netstat (RHEL 7)
+  when: ansible_distribution_major_version | int == 7
+  tags: [discovery]
+  block:
+    - name: Svc_disc_rhel | Ports | Netstat TCP
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          netstat -tlnp 2>/dev/null |
+          awk 'NR>2 && /LISTEN/ {
+            port=$4; sub(/.*:/,"",port);
+            split($7,a,"/"); pid=a[1];
+            if(pid!="" && port!="") print "TCP:"port":"pid
+          }'
+      register: svc_disc_rhel_ns_tcp
+      changed_when: false
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery]
+
+    - name: Svc_disc_rhel | Ports | Netstat UDP
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          netstat -ulnp 2>/dev/null |
+          awk 'NR>2 {
+            port=$4; sub(/.*:/,"",port);
+            split($6,a,"/"); pid=a[1];
+            if(pid!="" && port!="") print "UDP:"port":"pid
+          }'
+      register: svc_disc_rhel_ns_udp
+      changed_when: false
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery]
+
+- name: Svc_disc_rhel | Ports | Unificar líneas de puertos
+  ansible.builtin.set_fact:
+    svc_disc_rhel_port_lines: >-
+      {{
+        (svc_disc_rhel_ss_tcp.stdout_lines | default([])) +
+        (svc_disc_rhel_ss_udp.stdout_lines | default([])) +
+        (svc_disc_rhel_ns_tcp.stdout_lines | default([])) +
+        (svc_disc_rhel_ns_udp.stdout_lines | default([]))
+      }}
+    cacheable: false
+  tags: [discovery]
+
+- name: Svc_disc_rhel | Ports | Construir svc_disc_rhel_pid_ports
+  ansible.builtin.set_fact:
+    svc_disc_rhel_pid_ports: >-
+      {%- set ns = namespace(r={}) -%}
+      {%- for line in svc_disc_rhel_port_lines -%}
+        {%- set p = line.split(':') -%}
+        {%- if p | length == 3 -%}
+          {%- set proto = p[0] -%}
+          {%- set port = p[1] -%}
+          {%- set pid = p[2] | trim -%}
+          {%- if pid not in ns.r -%}{%- set _ = ns.r.update({pid: []}) -%}{%- endif -%}
+          {%- set _ = ns.r[pid].append({'protocol': proto, 'port': port}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.r }}
+    cacheable: false
+  tags: [discovery]

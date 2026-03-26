@@ -1,0 +1,168 @@
+---
+# =============================================================================
+# roles/svc_disc_win/tasks/webserver_detection.yml
+# Detección profunda de servidores web, proxies reversos y Tomcat en Windows.
+#
+# Detecta (fuera de Win32_Service):
+#   - Apache HTTPD (httpd.exe, apache.exe)
+#   - Nginx (nginx.exe)
+#   - HAProxy (haproxy.exe)
+#   - Traefik (traefik.exe)
+#   - Tomcat standalone (catalina, bootstrap.jar)
+#
+# Variables producidas:
+#   svc_disc_win_web_services — lista en formato canónico
+# =============================================================================
+
+- name: Svc_disc_win | web | Detectar procesos web/proxy en Windows
+  block:
+    - name: Svc_disc_win | web | Get-WmiObject Win32_Process — web/proxy
+      ansible.windows.win_shell:
+        _raw_params: |
+          $knownPids = @(
+            Get-WmiObject Win32_Service -ErrorAction SilentlyContinue |
+              Where-Object { $_.State -eq 'Running' } |
+              Select-Object -ExpandProperty ProcessId
+          )
+          $patterns = @('httpd', 'apache', 'nginx', 'haproxy',
+                        'traefik', 'envoy', 'varnish', 'squid')
+          $r = @()
+          Get-WmiObject Win32_Process -ErrorAction SilentlyContinue | ForEach-Object {
+            $pname = $_.Name.ToLower()
+            $cmdline = $_.CommandLine
+            $match = $false
+            foreach ($p in $patterns) {
+              if ($pname -like "*$p*") { $match = $true; break }
+            }
+            # También capturar Tomcat standalone (java con catalina)
+            if (-not $match -and $cmdline -and
+                ($cmdline -match 'catalina' -or $cmdline -match 'bootstrap\.jar')) {
+              $match = $true
+            }
+            if ($match -and $_.ProcessId -notin $knownPids -and $_.ProcessId -gt 0) {
+              $proc = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+              $cpu = $null; $memMB = $null; $uptime = $null
+              if ($proc) {
+                $cpu   = [math]::Round($proc.CPU, 2)
+                $memMB = [math]::Round($proc.WorkingSet64 / 1MB, 2)
+                try { $uptime = [int]((Get-Date) - $proc.StartTime).TotalSeconds } catch {}
+              }
+              $version = $null
+              $exePath = ($_.ExecutablePath -replace '"','')
+              if ($exePath -and (Test-Path $exePath -ErrorAction SilentlyContinue)) {
+                try { $version = (Get-Item $exePath).VersionInfo.ProductVersion } catch {}
+              }
+              $owner = $null
+              try { $owner = $_.GetOwner().User } catch {}
+              $r += [PSCustomObject]@{
+                PID         = $_.ProcessId
+                ProcessName = $_.Name
+                CommandLine = $_.CommandLine
+                ExePath     = $exePath
+                User        = $owner
+                CPUUsage    = $cpu
+                MemoryMB    = $memMB
+                Uptime      = $uptime
+                Version     = $version
+              }
+            }
+          }
+          if ($r.Count -gt 0) { $r | ConvertTo-Json -Depth 3 -Compress }
+          else { Write-Output "[]" }
+      register: svc_disc_win_web_raw
+      changed_when: false
+      timeout: "{{ svc_disc_win_discovery_timeout }}"
+      tags: [discovery, webserver]
+
+  rescue:
+    - name: Svc_disc_win | web | ERROR en detección web/proxy
+      ansible.builtin.debug:
+        msg: "[ERROR] svc_disc_win — web detect: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, webserver]
+
+  always:
+    - name: Svc_disc_win | web | Garantizar svc_disc_win_web_raw
+      ansible.builtin.set_fact:
+        svc_disc_win_web_raw: "{{ svc_disc_win_web_raw | default({'stdout': '[]'}) }}"
+        cacheable: false
+      tags: [discovery, webserver]
+
+- name: Svc_disc_win | web | Construir svc_disc_win_web_services
+  ansible.builtin.set_fact:
+    svc_disc_win_web_services: >-
+      {%- set ns = namespace(svcs=[]) -%}
+      {%- set raw = (svc_disc_win_web_raw.stdout | default('[]') | trim | from_json)
+                    if (svc_disc_win_web_raw.stdout | default('') | trim | length > 2) else [] -%}
+      {%- for proc in raw -%}
+        {%- set pid     = proc.PID | string -%}
+        {%- set pname   = proc.ProcessName | default('') | lower -%}
+        {%- set cmdline = proc.CommandLine | default('') -%}
+
+        {%- set svc_name = 'web-process-' ~ pid -%}
+        {%- set svc_type = 'WEB_SERVER' -%}
+        {%- set tech     = 'UNKNOWN' -%}
+
+        {%- if 'httpd' in pname or 'apache' in pname -%}
+          {%- set svc_name = 'apache-httpd' -%}
+          {%- set tech     = 'APACHE' -%}
+        {%- elif 'nginx' in pname -%}
+          {%- set svc_name = 'nginx' -%}
+          {%- set tech     = 'NGINX' -%}
+        {%- elif 'haproxy' in pname -%}
+          {%- set svc_name = 'haproxy' -%}
+          {%- set svc_type = 'REVERSE_PROXY' -%}
+          {%- set tech     = 'HAPROXY' -%}
+        {%- elif 'traefik' in pname -%}
+          {%- set svc_name = 'traefik' -%}
+          {%- set svc_type = 'REVERSE_PROXY' -%}
+          {%- set tech     = 'TRAEFIK' -%}
+        {%- elif 'envoy' in pname -%}
+          {%- set svc_name = 'envoy-proxy' -%}
+          {%- set svc_type = 'REVERSE_PROXY' -%}
+          {%- set tech     = 'ENVOY' -%}
+        {%- elif 'varnish' in pname -%}
+          {%- set svc_name = 'varnish' -%}
+          {%- set svc_type = 'REVERSE_PROXY' -%}
+          {%- set tech     = 'VARNISH' -%}
+        {%- elif 'squid' in pname -%}
+          {%- set svc_name = 'squid-proxy' -%}
+          {%- set svc_type = 'REVERSE_PROXY' -%}
+          {%- set tech     = 'SQUID' -%}
+        {%- elif 'catalina' in cmdline | lower or 'bootstrap.jar' in cmdline | lower -%}
+          {%- set svc_name = 'tomcat-standalone' -%}
+          {%- set svc_type = 'APP_SERVER' -%}
+          {%- set tech     = 'TOMCAT' -%}
+        {%- endif -%}
+
+        {%- set pid_ports  = (svc_disc_win_pid_ports | default({}))[pid] | default([]) -%}
+        {%- set protocol   = pid_ports[0].get('protocol', none) if pid_ports | length > 0 else none -%}
+        {%- set ports_json = pid_ports | to_json if pid_ports | length > 0 else none -%}
+
+        {%- set _ = ns.svcs.append({
+          'service_name': svc_name | truncate(200, true, ''),
+          'service_type': svc_type,
+          'technology': tech,
+          'pid': pid,
+          'running_user': proc.User | default(none),
+          'binary_path': proc.ExePath | default(none),
+          'version_detected': proc.Version | default(none),
+          'uptime_seconds': proc.Uptime | default(none),
+          'cpu_usage_percent': proc.CPUUsage | default(none),
+          'memory_usage_mb': proc.MemoryMB | default(none),
+          'protocol': protocol,
+          'listening_ports': ports_json,
+          'service_status': 'RUNNING',
+          'severity': svc_disc_win_severity_running,
+          'last_state_change_timestamp': none
+        }) -%}
+      {%- endfor -%}
+      {{ ns.svcs }}
+    cacheable: false
+  tags: [discovery, webserver]
+
+- name: Svc_disc_win | web | Resumen en {{ inventory_hostname }}
+  ansible.builtin.debug:
+    msg: >-
+      svc_disc_win — Detectados {{ svc_disc_win_web_services | default([]) | length }}
+      proceso(s) web/proxy adicional(es) en {{ inventory_hostname }}.
+  tags: [discovery, webserver]

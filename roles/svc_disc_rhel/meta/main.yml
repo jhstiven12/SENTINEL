@@ -1,0 +1,8 @@
+---
+galaxy_info:
+  role_name: svc_disc_rhel
+  author: sentinel
+  description: Descubrimiento de servicios systemd y procesos Java en RHEL 7/8/9/10 con persistencia Oracle
+  license: "MIT"
+  min_ansible_version: "2.15"
+dependencies: []

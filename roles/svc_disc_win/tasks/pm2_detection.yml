@@ -1,0 +1,133 @@
+---
+# =============================================================================
+# roles/svc_disc_win/tasks/pm2_detection.yml
+# Detecta aplicaciones PM2 en Windows (Node.js process manager).
+#
+# Variables producidas:
+#   svc_disc_win_pm2_services — lista en formato canónico
+# =============================================================================
+
+- name: Svc_disc_win | pm2 | Detectar y listar aplicaciones PM2
+  block:
+    - name: Svc_disc_win | pm2 | Buscar pm2 y obtener jlist
+      ansible.windows.win_shell:
+        _raw_params: |
+          $pm2 = $null
+          $paths = @(
+            (Get-Command pm2 -ErrorAction SilentlyContinue).Source,
+            "$env:APPDATA\npm\pm2.cmd",
+            "$env:ProgramFiles\nodejs\pm2.cmd"
+          )
+          foreach ($p in $paths) {
+            if ($p -and (Test-Path $p -ErrorAction SilentlyContinue)) { $pm2 = $p; break }
+          }
+          if (-not $pm2) { Write-Output "[]"; return }
+
+          $knownPids = @(
+            Get-WmiObject Win32_Service -ErrorAction SilentlyContinue |
+              Where-Object { $_.State -eq 'Running' } |
+              Select-Object -ExpandProperty ProcessId
+          )
+
+          try {
+            $raw = & cmd /c "$pm2 jlist" 2>$null
+            $apps = $raw | ConvertFrom-Json
+            $result = @()
+            foreach ($app in $apps) {
+              $pid = $app.pid
+              if ($pid -gt 0 -and $pid -notin $knownPids) {
+                $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+                $cpu   = $null; $memMB = $null; $uptime = $null
+                if ($proc) {
+                  $cpu    = [math]::Round($proc.CPU, 2)
+                  $memMB  = [math]::Round($proc.WorkingSet64 / 1MB, 2)
+                  try { $uptime = [int]((Get-Date) - $proc.StartTime).TotalSeconds } catch {}
+                }
+                $result += [PSCustomObject]@{
+                  AppName     = $app.name
+                  PID         = $pid
+                  Status      = $app.pm2_env.status
+                  Script      = $app.pm2_env.pm_exec_path
+                  Interpreter = $app.pm2_env.exec_interpreter
+                  Version     = $app.pm2_env.version
+                  CPUUsage    = $cpu
+                  MemoryMB    = $memMB
+                  Uptime      = $uptime
+                  User        = $app.pm2_env.username
+                }
+              }
+            }
+            if ($result.Count -gt 0) { $result | ConvertTo-Json -Depth 3 -Compress }
+            else { Write-Output "[]" }
+          } catch {
+            Write-Output "[]"
+          }
+      register: svc_disc_win_pm2_raw
+      changed_when: false
+      timeout: "{{ svc_disc_win_discovery_timeout }}"
+      tags: [discovery, pm2]
+
+  rescue:
+    - name: Svc_disc_win | pm2 | ERROR en detección PM2
+      ansible.builtin.debug:
+        msg: "[ERROR] svc_disc_win — PM2 detect: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, pm2]
+
+  always:
+    - name: Svc_disc_win | pm2 | Garantizar svc_disc_win_pm2_raw
+      ansible.builtin.set_fact:
+        svc_disc_win_pm2_raw: "{{ svc_disc_win_pm2_raw | default({'stdout': '[]'}) }}"
+        cacheable: false
+      tags: [discovery, pm2]
+
+- name: Svc_disc_win | pm2 | Construir svc_disc_win_pm2_services
+  ansible.builtin.set_fact:
+    svc_disc_win_pm2_services: >-
+      {%- set ns  = namespace(svcs=[]) -%}
+      {%- set raw = (svc_disc_win_pm2_raw.stdout | default('[]') | trim | from_json)
+                    if (svc_disc_win_pm2_raw.stdout | default('') | trim | length > 2) else [] -%}
+      {%- for app in raw -%}
+        {%- set pid        = app.PID | string -%}
+        {%- set svc_status = 'RUNNING' if app.Status | default('') == 'online' else 'STOPPED' -%}
+        {%- set severity   = svc_disc_win_severity_running
+                             if svc_status == 'RUNNING'
+                             else svc_disc_win_severity_stopped -%}
+
+        {%- set pid_ports  = (svc_disc_win_pid_ports | default({}))[pid] | default([]) -%}
+        {%- set protocol   = pid_ports[0].get('protocol', none) if pid_ports | length > 0 else none -%}
+        {%- set ports_json = pid_ports | to_json if pid_ports | length > 0 else none -%}
+
+        {%- set interpreter = app.Interpreter | default('') -%}
+        {%- set tech_name   = 'NODE_JS' -%}
+        {%- if 'python' in interpreter | lower -%}{%- set tech_name = 'PYTHON' -%}
+        {%- elif 'ts-node' in interpreter | lower -%}{%- set tech_name = 'NODE_TS' -%}
+        {%- endif -%}
+
+        {%- set _ = ns.svcs.append({
+          'service_name': ('pm2-' ~ app.AppName | default('app-' ~ pid)) | truncate(200, true, ''),
+          'service_type': 'APP_SERVER',
+          'technology': tech_name,
+          'pid': pid,
+          'running_user': app.User | default(none),
+          'binary_path': app.Script | default(none),
+          'version_detected': app.Version | default(none),
+          'uptime_seconds': app.Uptime | default(none),
+          'cpu_usage_percent': app.CPUUsage | default(none),
+          'memory_usage_mb': app.MemoryMB | default(none),
+          'protocol': protocol,
+          'listening_ports': ports_json,
+          'service_status': svc_status,
+          'severity': severity,
+          'last_state_change_timestamp': none
+        }) -%}
+      {%- endfor -%}
+      {{ ns.svcs }}
+    cacheable: false
+  tags: [discovery, pm2]
+
+- name: Svc_disc_win | pm2 | Resumen PM2 en {{ inventory_hostname }}
+  ansible.builtin.debug:
+    msg: >-
+      svc_disc_win — Detectadas {{ svc_disc_win_pm2_services | default([]) | length }}
+      app(s) PM2 en {{ inventory_hostname }}.
+  tags: [discovery, pm2]

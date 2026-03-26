@@ -1,0 +1,206 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/tasks/normalize.yml
+# Fusiona TODAS las fuentes y deduplica por PID y por service_name.
+#
+# Prioridad de fuentes (la primera gana si hay colisión de PID):
+#   1. systemd     — fuente más autoritativa, tiene ActiveState
+#   2. db          — detección profunda con versión
+#   3. java        — detección JVM con cmdline parsing
+#   4. web/proxy   — incluye inspección de config (mod_proxy, proxy_pass)
+#   5. pm2         — datos ricos de pm2 jlist
+#   6. infra       — agentes de seguridad/monitoreo
+#   7. docker      — contenedores (sin PID real del host)
+#
+# Deduplicación en dos pasadas:
+#   Paso 1: Por PID — si dos fuentes reportan el mismo PID, gana la de
+#           mayor prioridad (menor índice).
+#   Paso 2: Por service_name — si tras la pasada de PID quedan nombres
+#           duplicados (ej. "nginx" de systemd y "nginx" de web_detection),
+#           gana el que tenga más campos poblados.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Normalizar servicios systemd (fuente primaria)
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | normalize | Construir lista systemd normalizada
+  ansible.builtin.set_fact:
+    svc_disc_rhel_systemd_normalized: >-
+      {%- set ns = namespace(svcs=[]) -%}
+      {%- for svc in svc_disc_rhel_parsed_services | default([]) -%}
+
+        {%- set svc_id = svc.get('Id','unknown') -%}
+        {%- set svc_name = svc_id | regex_replace('\\.service$','') -%}
+
+        {%- set matched = [] -%}
+        {%- for entry in svc_disc_rhel_technology_map -%}
+          {%- if entry.keyword|lower in svc_name|lower and matched|length == 0 -%}
+            {%- set _ = matched.append(entry) -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {%- set tech = matched[0] if matched|length > 0
+                       else {'service_type': svc_disc_rhel_default_service_type,
+                             'technology': svc_disc_rhel_default_technology} -%}
+
+        {%- set main_pid = svc.get('MainPID','0') | trim -%}
+        {%- set ps_entry = (svc_disc_rhel_ps_map | default({}))[main_pid] | default({}) -%}
+
+        {%- set rss_kb = ps_entry.get('rss_kb','') -%}
+        {%- set mem_mb = (rss_kb|float / 1024)|round(2) if rss_kb|length > 0 else none -%}
+
+        {%- set etime = ps_entry.get('etime','') -%}
+        {%- set uptime = none -%}
+        {%- if etime|length > 0 -%}
+          {%- set parts = etime.split('-') -%}
+          {%- set days = parts[0]|int if parts|length == 2 else 0 -%}
+          {%- set hms = parts[-1].split(':') -%}
+          {%- if   hms|length == 3 -%}{%- set uptime = days*86400 + hms[0]|int*3600 + hms[1]|int*60 + hms[2]|int -%}
+          {%- elif hms|length == 2 -%}{%- set uptime = days*86400 + hms[0]|int*60   + hms[1]|int -%}
+          {%- else                 -%}{%- set uptime = hms[0]|int -%}
+          {%- endif -%}
+        {%- endif -%}
+
+        {%- set pid_ports = (svc_disc_rhel_pid_ports | default({}))[main_pid] | default([]) -%}
+        {%- set protocol = pid_ports[0].get('protocol',none) if pid_ports|length > 0 else none -%}
+        {%- set ports_json = pid_ports|to_json if pid_ports|length > 0 else none -%}
+
+        {%- set active_state = svc.get('ActiveState','') | trim -%}
+        {%- set sub_state = svc.get('SubState','') | trim -%}
+        {%- set svc_status = 'RUNNING'
+                               if active_state == 'active' and sub_state == 'running'
+                               else 'STOPPED' -%}
+        {%- set severity = svc_disc_rhel_severity_running
+                               if svc_status == 'RUNNING'
+                               else svc_disc_rhel_severity_stopped -%}
+
+        {%- set raw_ts = svc.get('ActiveEnterTimestamp','') | trim -%}
+        {%- set last_change = raw_ts if raw_ts|length > 0 and raw_ts != 'n/a' else none -%}
+
+        {%- set exec_start = (svc.get('ExecStart','') | trim).split(' ')[0] | default('') -%}
+        {%- set binary = exec_start if exec_start|length > 0 else none -%}
+
+        {%- set _ = ns.svcs.append({
+          'service_name': svc_name | truncate(200, true, ''),
+          'service_type': tech.service_type,
+          'technology': tech.technology,
+          'pid': main_pid if main_pid != '0' else none,
+          'running_user': ps_entry.get('user', none),
+          'binary_path': binary,
+          'version_detected': (svc_disc_rhel_ver_map | default({}))[svc_id] | default(none),
+          'uptime_seconds': uptime,
+          'cpu_usage_percent': ps_entry.get('cpu_pct', none),
+          'memory_usage_mb': mem_mb,
+          'protocol': protocol,
+          'listening_ports': ports_json,
+          'service_status': svc_status,
+          'severity': severity,
+          'last_state_change_timestamp': last_change,
+          '_source': 'systemd',
+          '_priority': 1
+        }) -%}
+
+      {%- endfor -%}
+      {{ ns.svcs }}
+    cacheable: false
+  tags: [discovery, services]
+
+# ---------------------------------------------------------------------------
+# 2. Concatenar todas las fuentes con prioridad
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | normalize | Concatenar todas las fuentes con metadatos de prioridad
+  ansible.builtin.set_fact:
+    svc_disc_rhel_all_raw: >-
+      {%- set ns = namespace(all=[]) -%}
+      {%- for s in svc_disc_rhel_systemd_normalized | default([]) -%}
+        {%- set _ = ns.all.append(s) -%}
+      {%- endfor -%}
+      {%- for s in svc_disc_rhel_db_services | default([]) -%}
+        {%- set _ = ns.all.append(s | combine({'_source': 'db', '_priority': 2})) -%}
+      {%- endfor -%}
+      {%- for s in svc_disc_rhel_java_services | default([]) -%}
+        {%- set _ = ns.all.append(s | combine({'_source': 'java', '_priority': 3})) -%}
+      {%- endfor -%}
+      {%- for s in svc_disc_rhel_web_services | default([]) -%}
+        {%- set _ = ns.all.append(s | combine({'_source': 'web', '_priority': 4})) -%}
+      {%- endfor -%}
+      {%- for s in svc_disc_rhel_pm2_services | default([]) -%}
+        {%- set _ = ns.all.append(s | combine({'_source': 'pm2', '_priority': 5})) -%}
+      {%- endfor -%}
+      {%- for s in svc_disc_rhel_infra_services | default([]) -%}
+        {%- set _ = ns.all.append(s | combine({'_source': 'infra', '_priority': 6})) -%}
+      {%- endfor -%}
+      {%- for s in svc_disc_rhel_docker_services | default([]) -%}
+        {%- set _ = ns.all.append(s | combine({'_source': 'docker', '_priority': 7})) -%}
+      {%- endfor -%}
+      {{ ns.all }}
+    cacheable: false
+  tags: [discovery]
+
+# ---------------------------------------------------------------------------
+# 3. Deduplicar — Paso 1: por PID, Paso 2: por service_name
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | normalize | Deduplicar y generar svc_disc_rhel_sentinel_services
+  ansible.builtin.set_fact:
+    svc_disc_rhel_sentinel_services: >-
+      {%- set ns = namespace(by_pid={}, by_name={}, final=[]) -%}
+
+      {# Paso 1: Dedup por PID — menor _priority gana #}
+      {%- for s in svc_disc_rhel_all_raw | default([]) -%}
+        {%- set pid = s.pid | default(none) | string -%}
+        {%- if pid and pid != 'None' and pid != '0' -%}
+          {%- if pid not in ns.by_pid
+                 or s.get('_priority',99)|int < ns.by_pid[pid].get('_priority',99)|int -%}
+            {%- set _ = ns.by_pid.update({pid: s}) -%}
+          {%- endif -%}
+        {%- else -%}
+          {# Sin PID (containers, etc.) — pasar directo al paso 2 #}
+          {%- set _ = ns.final.append(s) -%}
+        {%- endif -%}
+      {%- endfor -%}
+
+      {# Mover ganadores de PID al pool de paso 2 #}
+      {%- for pid, s in ns.by_pid.items() -%}
+        {%- set _ = ns.final.append(s) -%}
+      {%- endfor -%}
+
+      {# Paso 2: Dedup por service_name — menor _priority gana #}
+      {%- for s in ns.final -%}
+        {%- set name = s.service_name -%}
+        {%- if name not in ns.by_name
+               or s.get('_priority',99)|int < ns.by_name[name].get('_priority',99)|int -%}
+          {%- set _ = ns.by_name.update({name: s}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+
+      {# Limpiar campos internos _source y _priority antes de persistir #}
+      {%- set clean = [] -%}
+      {%- for name, s in ns.by_name.items() -%}
+        {%- set cleaned = {} -%}
+        {%- for k, v in s.items() -%}
+          {%- if not k.startswith('_') -%}
+            {%- set _ = cleaned.update({k: v}) -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {%- set _ = clean.append(cleaned) -%}
+      {%- endfor -%}
+      {{ clean }}
+    cacheable: false
+  tags: [discovery, services, java, pm2, database, webserver, docker, infra]
+
+# ---------------------------------------------------------------------------
+# 4. Resumen con métricas de deduplicación
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | normalize | Resumen total en {{ inventory_hostname }}
+  ansible.builtin.debug:
+    msg: >-
+      svc_disc_rhel — Fuentes: {{ svc_disc_rhel_all_raw | default([]) | length }} brutos →
+      Deduplicados: {{ svc_disc_rhel_sentinel_services | length }} únicos
+      (systemd: {{ svc_disc_rhel_systemd_normalized | default([]) | length }},
+       java: {{ svc_disc_rhel_java_services | default([]) | length }},
+       pm2: {{ svc_disc_rhel_pm2_services | default([]) | length }},
+       db: {{ svc_disc_rhel_db_services | default([]) | length }},
+       web: {{ svc_disc_rhel_web_services | default([]) | length }},
+       docker: {{ svc_disc_rhel_docker_services | default([]) | length }},
+       infra: {{ svc_disc_rhel_infra_services | default([]) | length }})
+      en {{ inventory_hostname }}.
+  tags: [discovery]

@@ -1,0 +1,60 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/tasks/main.yml — Orquestador del rol svc_disc_rhel
+# =============================================================================
+
+- name: Svc_disc_rhel | Validación pre-ejecución (conectividad, esquema, secuencias)
+  ansible.builtin.include_tasks: preflight.yml
+  tags: [preflight, always]
+
+- name: Svc_disc_rhel | Inicializar batch de ejecución
+  ansible.builtin.include_tasks: batch_init.yml
+  tags: [batch, always]
+
+- name: Svc_disc_rhel | Upsert servidor en OBS_SERVER
+  ansible.builtin.include_tasks: server.yml
+  tags: [servers]
+
+- name: Svc_disc_rhel | Descubrir puertos en escucha
+  ansible.builtin.include_tasks: ports.yml
+  tags: [discovery]
+
+- name: Svc_disc_rhel | Descubrir servicios systemd activos
+  ansible.builtin.include_tasks: services.yml
+  tags: [discovery, services]
+
+- name: Svc_disc_rhel | Descubrir procesos Java (JVM)
+  ansible.builtin.include_tasks: java_detection.yml
+  tags: [discovery, java]
+
+- name: Svc_disc_rhel | Descubrir aplicaciones PM2
+  ansible.builtin.include_tasks: pm2_detection.yml
+  tags: [discovery, pm2]
+
+- name: Svc_disc_rhel | Descubrir motores de base de datos (Oracle, PG, MySQL, Mongo, MSSQL)
+  ansible.builtin.include_tasks: db_detection.yml
+  tags: [discovery, database]
+
+- name: Svc_disc_rhel | Descubrir web servers, reverse proxies, Apache, Tomcat
+  ansible.builtin.include_tasks: webserver_detection.yml
+  tags: [discovery, webserver]
+
+- name: Svc_disc_rhel | Descubrir contenedores Docker / Podman
+  ansible.builtin.include_tasks: docker_detection.yml
+  tags: [discovery, docker]
+
+- name: Svc_disc_rhel | Descubrir agentes de seguridad, monitoreo, DNS, LDAP, K8s
+  ansible.builtin.include_tasks: infra_agents_detection.yml
+  tags: [discovery, infra]
+
+- name: Svc_disc_rhel | Normalizar todos los datos en svc_disc_rhel_sentinel_services
+  ansible.builtin.include_tasks: normalize.yml
+  tags: [discovery, services, java, pm2, database, webserver, docker, infra]
+
+- name: Svc_disc_rhel | Persistir servicios en Oracle
+  ansible.builtin.include_tasks: oracle_persist.yml
+  tags: [oracle_insert, services]
+
+- name: Svc_disc_rhel | Finalizar batch — actualizar TOTAL_SERVERS
+  ansible.builtin.include_tasks: batch_finalize.yml
+  tags: [batch, oracle_insert]

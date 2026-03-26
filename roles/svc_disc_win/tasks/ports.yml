@@ -1,0 +1,90 @@
+---
+# =============================================================================
+# roles/svc_disc_win/tasks/ports.yml
+# Produce: svc_disc_win_pid_ports { "PID": [{protocol, port}, ...] }
+# =============================================================================
+
+- name: Svc_disc_win | ports | TCP — Get-NetTCPConnection
+  block:
+    - name: Svc_disc_win | ports | Ejecutar Get-NetTCPConnection
+      ansible.windows.win_shell:
+        _raw_params: |
+          try {
+            $r = Get-NetTCPConnection -State Listen -ErrorAction Stop |
+              Select-Object LocalPort, OwningProcess |
+              ConvertTo-Json -Compress
+            Write-Output $r
+          } catch { Write-Output "[]" }
+      register: svc_disc_win_tcp_raw
+      changed_when: false
+      timeout: "{{ svc_disc_win_discovery_timeout }}"
+      tags: [discovery]
+  rescue:
+    - name: Svc_disc_win | ports | TCP fallback
+      ansible.builtin.set_fact:
+        svc_disc_win_tcp_raw: {stdout: "[]"}
+        cacheable: false
+      tags: [discovery]
+
+- name: Svc_disc_win | ports | UDP — netstat
+  block:
+    - name: Svc_disc_win | ports | Ejecutar netstat para UDP
+      ansible.windows.win_shell:
+        _raw_params: |
+          $r = @()
+          netstat -ano 2>$null | Select-String '^\s+UDP' | ForEach-Object {
+            $cols = ($_ -split '\s+') | Where-Object { $_ -ne '' }
+            if ($cols.Count -ge 4) {
+              $r += [PSCustomObject]@{
+                LocalPort     = ($cols[1] -split ':')[-1]
+                OwningProcess = $cols[3]
+              }
+            }
+          }
+          if ($r.Count -gt 0) { $r | ConvertTo-Json -Compress } else { Write-Output "[]" }
+      register: svc_disc_win_udp_raw
+      changed_when: false
+      timeout: "{{ svc_disc_win_discovery_timeout }}"
+      tags: [discovery]
+  rescue:
+    - name: Svc_disc_win | ports | UDP fallback
+      ansible.builtin.set_fact:
+        svc_disc_win_udp_raw: {stdout: "[]"}
+        cacheable: false
+      tags: [discovery]
+
+- name: Svc_disc_win | ports | Parsear TCP
+  ansible.builtin.set_fact:
+    svc_disc_win_tcp_list: >-
+      {{ (svc_disc_win_tcp_raw.stdout | default('[]') | trim | from_json)
+         if (svc_disc_win_tcp_raw.stdout | default('') | trim | length > 2) else [] }}
+    cacheable: false
+  tags: [discovery]
+
+- name: Svc_disc_win | ports | Parsear UDP
+  ansible.builtin.set_fact:
+    svc_disc_win_udp_list: >-
+      {{ (svc_disc_win_udp_raw.stdout | default('[]') | trim | from_json)
+         if (svc_disc_win_udp_raw.stdout | default('') | trim | length > 2) else [] }}
+    cacheable: false
+  tags: [discovery]
+
+- name: Svc_disc_win | ports | Construir svc_disc_win_pid_ports
+  ansible.builtin.set_fact:
+    svc_disc_win_pid_ports: >-
+      {%- set ns = namespace(r={}) -%}
+      {%- for item in (svc_disc_win_tcp_list | default([])) -%}
+        {%- set pid = item.OwningProcess | string -%}
+        {%- set port = item.LocalPort | string -%}
+        {%- if pid not in ns.r -%}{%- set _ = ns.r.update({pid: []}) -%}{%- endif -%}
+        {%- set _ = ns.r[pid].append({'protocol': 'TCP', 'port': port}) -%}
+      {%- endfor -%}
+      {%- for item in (svc_disc_win_udp_list | default([])) -%}
+        {%- set pid = item.OwningProcess | string -%}
+        {%- set port = item.LocalPort | string -%}
+        {%- if pid not in ns.r -%}{%- set _ = ns.r.update({pid: []}) -%}{%- endif -%}
+        {%- set _ = ns.r[pid].append({'protocol': 'UDP', 'port': port}) -%}
+      {%- endfor -%}
+      {{ ns.r }}
+    cacheable: false
+  tags: [discovery]

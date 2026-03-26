@@ -1,0 +1,42 @@
+---
+# =============================================================================
+# roles/svc_disc_win/tasks/batch_init.yml
+# =============================================================================
+
+- name: Svc_disc_win | batch_init | Generar UUID (run_once en controller)
+  ansible.builtin.set_fact:
+    svc_disc_win_batch_id: "{{ lookup('community.general.random_string',
+                               length=36, special=false) | to_uuid }}"
+    cacheable: false
+  run_once: true
+  delegate_to: localhost
+  tags: [batch]
+
+- name: Svc_disc_win | batch_init | INSERT OBS_BATCH_EXECUTION
+  opitzconsulting.ansible_oracle.oracle_sql:
+    hostname: "{{ svc_disc_win_oracle_host }}"
+    port: "{{ svc_disc_win_oracle_port }}"
+    service_name: "{{ svc_disc_win_oracle_service }}"
+    username: "{{ svc_disc_win_oracle_user }}"
+    password: "{{ svc_disc_win_oracle_password }}"
+    mode: "sysdba"
+    sql: >-
+      INSERT INTO {{ svc_disc_win_oracle_schema }}.OBS_BATCH_EXECUTION
+        (BATCH_ID, BATCH_EXECUTION_TIMESTAMP, EXECUTION_TYPE, TOTAL_SERVERS)
+      VALUES ('{{ svc_disc_win_batch_id }}', SYSTIMESTAMP,
+              '{{ svc_disc_win_execution_type }}', 0)
+  environment:
+    ORACLE_HOME: /opt/oracle/instantclient
+    LD_LIBRARY_PATH: /opt/oracle/instantclient
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  no_log: false
+  run_once: true
+  delegate_to: "{{ svc_disc_win_oracle_db_node }}"
+  tags: [batch, oracle_insert]
+
+- name: Svc_disc_win | batch_init | Difundir svc_disc_win_batch_id
+  ansible.builtin.set_fact:
+    svc_disc_win_batch_id: "{{ hostvars[ansible_play_hosts[0]]['svc_disc_win_batch_id'] }}"
+    cacheable: false
+  tags: [batch]

@@ -1,0 +1,18 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/vars/main.yml.example
+# Copiar a vars/main.yml y completar con valores reales antes de usar.
+# Encrypt: ansible-vault encrypt roles/svc_disc_rhel/vars/main.yml
+# =============================================================================
+
+# Oracle Database credentials
+svc_disc_rhel_oracle_user: "CHANGE_ME_DB_USER"
+svc_disc_rhel_oracle_password: "CHANGE_ME_DB_PASSWORD"
+svc_disc_rhel_oracle_dsn: "CHANGE_ME_HOST:1521/CHANGE_ME_SERVICE"
+
+# Oracle delegate host — inventory hostname que ejecuta las queries Oracle
+svc_disc_rhel_oracle_db_node: "CHANGE_ME_DB_DELEGATE_HOST"
+
+# Metadatos de ejecución
+svc_disc_rhel_execution_type: "SCHEDULED"    # SCHEDULED | MANUAL | ADHOC
+svc_disc_rhel_environment: "PRODUCTION"      # PRODUCTION | STAGING | DEVELOPMENT

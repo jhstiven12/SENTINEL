@@ -1,0 +1,242 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/tasks/docker_detection.yml
+# Detección profunda de Docker / Podman y contenedores en ejecución.
+#
+# Detecta:
+#   - Docker daemon (dockerd) si no está en systemd
+#   - Podman contenedores rootless y rootful
+#   - Contenedores en ejecución con: nombre, imagen, puertos, CPU, memoria
+#
+# Variables producidas:
+#   svc_disc_rhel_docker_services — lista en formato canónico
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Detectar runtime disponible (docker / podman)
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | docker | Detectar runtime de contenedores
+  block:
+    - name: Svc_disc_rhel | docker | Verificar Docker disponible  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: command -v docker 2>/dev/null && docker info --format '{% raw %}{{.ServerVersion}}{% endraw %}' 2>/dev/null || echo "NO_DOCKER"
+        executable: /bin/bash
+      register: svc_disc_rhel_docker_check
+      changed_when: false
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery, docker]
+
+    - name: Svc_disc_rhel | docker | Verificar Podman disponible  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: command -v podman 2>/dev/null && podman --version 2>/dev/null || echo "NO_PODMAN"
+        executable: /bin/bash
+      register: svc_disc_rhel_podman_check
+      changed_when: false
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery, docker]
+
+  rescue:
+    - name: Svc_disc_rhel | docker | WARN detección runtime
+      ansible.builtin.debug:
+        msg: "[WARN] svc_disc_rhel — container runtime detect: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, docker]
+
+# ---------------------------------------------------------------------------
+# 2. Listar contenedores Docker en ejecución
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | docker | Listar contenedores Docker
+  block:
+    - name: Svc_disc_rhel | docker | Docker ps con stats
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          docker ps --no-trunc --format \
+          '{% raw %}{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}|{{.RunningFor}}{% endraw %}' \
+          2>/dev/null || true
+        executable: /bin/bash
+      register: svc_disc_rhel_docker_ps_raw
+      changed_when: false
+      when: >
+        svc_disc_rhel_docker_check.stdout | default('') is not search('NO_DOCKER')
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery, docker]
+
+    - name: Svc_disc_rhel | docker | Docker stats snapshot (no-stream)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          docker stats --no-stream --no-trunc --format \
+          '{% raw %}{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.PIDs}}{% endraw %}' \
+          2>/dev/null || true
+        executable: /bin/bash
+      register: svc_disc_rhel_docker_stats_raw
+      changed_when: false
+      when: >
+        svc_disc_rhel_docker_check.stdout | default('') is not search('NO_DOCKER')
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery, docker]
+
+  rescue:
+    - name: Svc_disc_rhel | docker | WARN docker ps
+      ansible.builtin.debug:
+        msg: "[WARN] svc_disc_rhel — docker ps: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, docker]
+
+  always:
+    - name: Svc_disc_rhel | docker | Garantizar variables docker
+      ansible.builtin.set_fact:
+        svc_disc_rhel_docker_ps_raw: "{{ svc_disc_rhel_docker_ps_raw | default({'stdout_lines': []}) }}"
+        svc_disc_rhel_docker_stats_raw: "{{ svc_disc_rhel_docker_stats_raw | default({'stdout_lines': []}) }}"
+        cacheable: false
+      tags: [discovery, docker]
+
+# ---------------------------------------------------------------------------
+# 3. Listar contenedores Podman en ejecución
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | docker | Listar contenedores Podman
+  block:
+    - name: Svc_disc_rhel | docker | Podman ps
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          podman ps --no-trunc --format \
+          '{% raw %}{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}|{{.RunningFor}}{% endraw %}' \
+          2>/dev/null || true
+        executable: /bin/bash
+      register: svc_disc_rhel_podman_ps_raw
+      changed_when: false
+      when: >
+        svc_disc_rhel_podman_check.stdout | default('') is not search('NO_PODMAN')
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery, docker]
+
+  rescue:
+    - name: Svc_disc_rhel | docker | WARN podman ps
+      ansible.builtin.debug:
+        msg: "[WARN] svc_disc_rhel — podman ps"
+      tags: [discovery, docker]
+
+  always:
+    - name: Svc_disc_rhel | docker | Garantizar podman vars
+      ansible.builtin.set_fact:
+        svc_disc_rhel_podman_ps_raw: "{{ svc_disc_rhel_podman_ps_raw | default({'stdout_lines': []}) }}"
+        cacheable: false
+      tags: [discovery, docker]
+
+# ---------------------------------------------------------------------------
+# 4. Normalizar → svc_disc_rhel_docker_services
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | docker | Construir svc_disc_rhel_docker_services
+  ansible.builtin.set_fact:
+    svc_disc_rhel_docker_services: >-
+      {%- set ns = namespace(svcs=[], stats={}) -%}
+
+      {# Parsear stats en dict {name: {cpu, mem}} #}
+      {%- for line in svc_disc_rhel_docker_stats_raw.stdout_lines | default([]) -%}
+        {%- set cols = line.split('|') -%}
+        {%- if cols | length >= 3 -%}
+          {%- set _ = ns.stats.update({
+            cols[0] | trim: {
+              'cpu': cols[1] | trim | regex_replace('%', ''),
+              'mem': (cols[2] | trim).split('/')[0] | trim | regex_replace('[A-Za-z]+', '')
+            }
+          }) -%}
+        {%- endif -%}
+      {%- endfor -%}
+
+      {# Docker containers #}
+      {%- set docker_ver = svc_disc_rhel_docker_check.stdout | default('')
+                           | regex_search('[0-9]+\\.[0-9]+\\.?[0-9]*') -%}
+      {%- for line in svc_disc_rhel_docker_ps_raw.stdout_lines | default([]) -%}
+        {%- set cols = line.split('|') -%}
+        {%- if cols|length >= 5 -%}
+          {%- set cname = cols[1]|trim -%}
+          {%- set image = cols[2]|trim -%}
+          {%- set status = cols[3]|trim -%}
+          {%- set ports = cols[4]|trim -%}
+          {%- set st = ns.stats.get(cname, {}) -%}
+
+          {%- set ports_list = [] -%}
+          {%- if ports|length > 0 -%}
+            {%- for p in ports.split(',') -%}
+              {%- set port_part = p|trim -%}
+              {%- if ':' in port_part -%}
+                {%- set host_port = port_part.split(':')[-1].split('->')[0] -%}
+                {%- set _ = ports_list.append({'protocol':'TCP','port':host_port}) -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endif -%}
+
+          {%- set _ = ns.svcs.append({
+            'service_name': ('docker-' ~ cname) | truncate(200, true, ''),
+            'service_type': 'CONTAINER',
+            'technology': 'DOCKER',
+            'pid': none,
+            'running_user': 'root',
+            'binary_path': image,
+            'version_detected': docker_ver | default(none),
+            'uptime_seconds': none,
+            'cpu_usage_percent': st.get('cpu', none),
+            'memory_usage_mb': st.get('mem', none),
+            'protocol': 'TCP' if ports_list|length > 0 else none,
+            'listening_ports': ports_list|to_json if ports_list|length > 0 else none,
+            'service_status': 'RUNNING' if 'Up' in status else 'STOPPED',
+            'severity': svc_disc_rhel_severity_running if 'Up' in status
+                                           else svc_disc_rhel_severity_stopped,
+            'last_state_change_timestamp': none
+          }) -%}
+        {%- endif -%}
+      {%- endfor -%}
+
+      {# Podman containers #}
+      {%- set podman_ver = svc_disc_rhel_podman_check.stdout | default('')
+                           | regex_search('[0-9]+\\.[0-9]+\\.?[0-9]*') -%}
+      {%- for line in svc_disc_rhel_podman_ps_raw.stdout_lines | default([]) -%}
+        {%- set cols = line.split('|') -%}
+        {%- if cols|length >= 5 -%}
+          {%- set cname = cols[1]|trim -%}
+          {%- set image = cols[2]|trim -%}
+          {%- set status = cols[3]|trim -%}
+          {%- set ports = cols[4]|trim -%}
+
+          {%- set ports_list = [] -%}
+          {%- if ports|length > 0 -%}
+            {%- for p in ports.split(',') -%}
+              {%- set port_part = p|trim -%}
+              {%- if ':' in port_part -%}
+                {%- set host_port = port_part.split(':')[-1].split('->')[0] -%}
+                {%- set _ = ports_list.append({'protocol':'TCP','port':host_port}) -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endif -%}
+
+          {%- set _ = ns.svcs.append({
+            'service_name': ('podman-' ~ cname) | truncate(200, true, ''),
+            'service_type': 'CONTAINER',
+            'technology': 'PODMAN',
+            'pid': none,
+            'running_user': none,
+            'binary_path': image,
+            'version_detected': podman_ver | default(none),
+            'uptime_seconds': none,
+            'cpu_usage_percent': none,
+            'memory_usage_mb': none,
+            'protocol': 'TCP' if ports_list|length > 0 else none,
+            'listening_ports': ports_list|to_json if ports_list|length > 0 else none,
+            'service_status': 'RUNNING' if 'Up' in status else 'STOPPED',
+            'severity': svc_disc_rhel_severity_running if 'Up' in status
+                                           else svc_disc_rhel_severity_stopped,
+            'last_state_change_timestamp': none
+          }) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.svcs }}
+    cacheable: false
+  tags: [discovery, docker]
+
+- name: Svc_disc_rhel | docker | Resumen contenedores en {{ inventory_hostname }}
+  ansible.builtin.debug:
+    msg: >-
+      svc_disc_rhel — Detectados {{ svc_disc_rhel_docker_services | default([]) | length }}
+      contenedor(es) activo(s) en {{ inventory_hostname }}.
+  tags: [discovery, docker]

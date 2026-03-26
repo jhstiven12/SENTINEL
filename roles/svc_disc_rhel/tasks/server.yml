@@ -1,0 +1,69 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/tasks/server.yml
+# Variables producidas:
+#   svc_disc_rhel_server_id  — UUID determinista del hostname
+#   svc_disc_rhel_os_label   — Cadena de SO para OBS_SERVER
+#   svc_disc_rhel_server_ip  — IP primaria del host
+# =============================================================================
+
+- name: Svc_disc_rhel | Server | Upsert OBS_SERVER para {{ inventory_hostname }}
+  block:
+    - name: Svc_disc_rhel | Server | Generar svc_disc_rhel_server_id desde hostname
+      ansible.builtin.set_fact:
+        svc_disc_rhel_server_id: "{{ inventory_hostname | to_uuid }}"
+        cacheable: false
+      tags: [servers]
+
+    - name: Svc_disc_rhel | Server | Construir svc_disc_rhel_os_label
+      ansible.builtin.set_fact:
+        svc_disc_rhel_os_label: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+        cacheable: false
+      tags: [servers]
+
+    - name: Svc_disc_rhel | Server | Resolver svc_disc_rhel_server_ip
+      ansible.builtin.set_fact:
+        svc_disc_rhel_server_ip: >-
+          {{ ansible_default_ipv4.address
+             | default(ansible_all_ipv4_addresses[0] | default('0.0.0.0')) }}
+        cacheable: false
+      tags: [servers]
+
+    - name: Svc_disc_rhel | Server | MERGE OBS_SERVER
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ svc_disc_rhel_oracle_host }}"
+        port: "{{ svc_disc_rhel_oracle_port }}"
+        service_name: "{{ svc_disc_rhel_oracle_service }}"
+        username: "{{ svc_disc_rhel_oracle_user }}"
+        password: "{{ svc_disc_rhel_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          MERGE INTO {{ svc_disc_rhel_oracle_schema }}.OBS_SERVER tgt
+          USING (SELECT '{{ inventory_hostname }}' AS hostname FROM dual) src
+          ON (tgt.HOSTNAME = src.hostname)
+          WHEN MATCHED THEN
+            UPDATE SET tgt.IP_ADDRESS       = '{{ svc_disc_rhel_server_ip }}',
+                       tgt.OPERATING_SYSTEM = '{{ svc_disc_rhel_os_label | truncate(50, true, "") | replace("'", "''") }}',
+                       tgt.ENVIRONMENT      = '{{ svc_disc_rhel_environment }}'
+          WHEN NOT MATCHED THEN
+            INSERT (SERVER_ID, HOSTNAME, IP_ADDRESS, OPERATING_SYSTEM, ENVIRONMENT)
+            VALUES ('{{ svc_disc_rhel_server_id }}', '{{ inventory_hostname }}',
+                    '{{ svc_disc_rhel_server_ip }}',
+                    '{{ svc_disc_rhel_os_label | truncate(50, true, "") | replace("'", "''") }}',
+                    '{{ svc_disc_rhel_environment }}')
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ svc_disc_rhel_oracle_db_node }}"
+      tags: [servers, oracle_insert]
+
+  rescue:
+    - name: Svc_disc_rhel | Server | ERROR en upsert OBS_SERVER
+      ansible.builtin.debug:
+        msg: >-
+          [ERROR] svc_disc_rhel — OBS_SERVER falló para {{ inventory_hostname }}.
+          {{ ansible_failed_result.msg | default('desconocido') }}
+      tags: [servers]

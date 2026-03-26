@@ -1,0 +1,119 @@
+---
+# =============================================================================
+# roles/svc_disc_win/tasks/services.yml
+# Produce:
+#   svc_disc_win_services   — lista de dicts Win32_Service
+#   svc_disc_win_uptime_map — { pid -> uptime_seconds }
+#   svc_disc_win_ver_map    — { service_name -> version }
+# =============================================================================
+
+- name: Svc_disc_win | services | Win32_Service + Get-Process
+  block:
+    - name: Svc_disc_win | services | Consulta WMI
+      ansible.windows.win_shell:
+        _raw_params: |
+          $r = @()
+          Get-WmiObject Win32_Service -ErrorAction Stop |
+            Where-Object { $_.State -eq 'Running' } |
+            ForEach-Object {
+              $proc = $null; $cpu = $null; $memMB = $null
+              if ($_.ProcessId -gt 0) {
+                $proc = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+              }
+              if ($proc) {
+                $cpu   = [math]::Round($proc.CPU, 2)
+                $memMB = [math]::Round($proc.WorkingSet64 / 1MB, 2)
+              }
+              $r += [PSCustomObject]@{
+                ServiceName = $_.Name; DisplayName = $_.DisplayName
+                State = $_.State; StartMode = $_.StartMode
+                ProcessId = $_.ProcessId; PathName = $_.PathName
+                StartName = $_.StartName
+                CPUUsage = $cpu; MemoryMB = $memMB
+              }
+            }
+          if ($r.Count -gt 0) { $r | ConvertTo-Json -Depth 3 -Compress }
+          else { Write-Output "[]" }
+      register: svc_disc_win_svc_raw
+      changed_when: false
+      timeout: "{{ svc_disc_win_discovery_timeout }}"
+      tags: [discovery, services]
+  rescue:
+    - name: Svc_disc_win | services | ERROR WMI
+      ansible.builtin.debug:
+        msg: "[ERROR] svc_disc_win — Win32_Service: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, services]
+
+- name: Svc_disc_win | services | Uptime de procesos
+  ansible.windows.win_shell:
+    _raw_params: |
+      $r = @()
+      Get-Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.Id -gt 0 } | ForEach-Object {
+          try {
+            $r += [PSCustomObject]@{ PID = $_.Id; Uptime = [int]((Get-Date) - $_.StartTime).TotalSeconds }
+          } catch {}
+        }
+      if ($r.Count -gt 0) { $r | ConvertTo-Json -Compress } else { Write-Output "[]" }
+  register: svc_disc_win_uptime_raw
+  changed_when: false
+  timeout: "{{ svc_disc_win_discovery_timeout }}"
+  tags: [discovery, services]
+
+- name: Svc_disc_win | services | Versión de binario
+  ansible.windows.win_shell:
+    _raw_params: |
+      $r = @()
+      Get-WmiObject Win32_Service -ErrorAction SilentlyContinue |
+        Where-Object { $_.State -eq 'Running' } | ForEach-Object {
+          $version = $null
+          $path = ($_.PathName -replace '"','') -split ' ' | Select-Object -First 1
+          if ($path -and (Test-Path $path -ErrorAction SilentlyContinue)) {
+            try { $version = (Get-Item $path).VersionInfo.ProductVersion } catch {}
+          }
+          $r += [PSCustomObject]@{ ServiceName = $_.Name; Version = $version }
+        }
+      if ($r.Count -gt 0) { $r | ConvertTo-Json -Compress } else { Write-Output "[]" }
+  register: svc_disc_win_ver_raw
+  changed_when: false
+  timeout: "{{ svc_disc_win_discovery_timeout }}"
+  tags: [discovery, services]
+
+- name: Svc_disc_win | services | Parsear svc_disc_win_services
+  ansible.builtin.set_fact:
+    svc_disc_win_services: >-
+      {{ (svc_disc_win_svc_raw.stdout | default('[]') | trim | from_json)
+         if (svc_disc_win_svc_raw.stdout | default('') | trim | length > 2) else [] }}
+    cacheable: false
+  tags: [discovery, services]
+
+- name: Svc_disc_win | services | Filtrar excluidos
+  ansible.builtin.set_fact:
+    svc_disc_win_services: >-
+      {{ svc_disc_win_services | rejectattr('ServiceName', 'in', svc_disc_win_excluded_services) | list }}
+    cacheable: false
+  tags: [discovery, services]
+
+- name: Svc_disc_win | services | Construir svc_disc_win_uptime_map
+  ansible.builtin.set_fact:
+    svc_disc_win_uptime_map: >-
+      {%- set ns = namespace(r={}) -%}
+      {%- set raw = (svc_disc_win_uptime_raw.stdout | default('[]') | trim | from_json)
+                    if (svc_disc_win_uptime_raw.stdout | default('') | trim | length > 2) else [] -%}
+      {%- for e in raw -%}{%- set _ = ns.r.update({e.PID | string: e.Uptime}) -%}{%- endfor -%}
+      {{ ns.r }}
+    cacheable: false
+  tags: [discovery, services]
+
+- name: Svc_disc_win | services | Construir svc_disc_win_ver_map
+  ansible.builtin.set_fact:
+    svc_disc_win_ver_map: >-
+      {%- set ns = namespace(r={}) -%}
+      {%- set raw = (svc_disc_win_ver_raw.stdout | default('[]') | trim | from_json)
+                    if (svc_disc_win_ver_raw.stdout | default('') | trim | length > 2) else [] -%}
+      {%- for e in raw -%}
+        {%- if e.Version -%}{%- set _ = ns.r.update({e.ServiceName: e.Version[:200]}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ ns.r }}
+    cacheable: false
+  tags: [discovery, services]

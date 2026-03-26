@@ -1,0 +1,142 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/tasks/oracle_persist.yml
+# Itera svc_disc_rhel_sentinel_services:
+#   1. MERGE OBS_SERVICE  2. SELECT SERVICE_ID  3. INSERT OBS_SERVICE_LOG
+# Todas las operaciones delegadas a svc_disc_rhel_oracle_db_node
+# =============================================================================
+
+- name: Svc_disc_rhel | Oracle | Persistir servicios de {{ inventory_hostname }}
+  block:
+    - name: Svc_disc_rhel | Oracle | Procesar — {{ svc_disc_rhel_svc.service_name }}
+      loop: "{{ svc_disc_rhel_sentinel_services | default([]) }}"
+      loop_control:
+        loop_var: svc_disc_rhel_svc
+        label: "{{ svc_disc_rhel_svc.service_name }}"
+      block:
+        - name: Svc_disc_rhel | Oracle | MERGE OBS_SERVICE — {{ svc_disc_rhel_svc.service_name }}
+          opitzconsulting.ansible_oracle.oracle_sql:
+            hostname: "{{ svc_disc_rhel_oracle_host }}"
+            port: "{{ svc_disc_rhel_oracle_port }}"
+            service_name: "{{ svc_disc_rhel_oracle_service }}"
+            username: "{{ svc_disc_rhel_oracle_user }}"
+            password: "{{ svc_disc_rhel_oracle_password }}"
+            mode: "sysdba"
+            sql: >-
+              MERGE INTO {{ svc_disc_rhel_oracle_schema }}.OBS_SERVICE tgt
+              USING (SELECT '{{ svc_disc_rhel_server_id }}' AS server_id,
+                            '{{ svc_disc_rhel_svc.service_name | replace("'", "''") }}' AS service_name
+                     FROM dual) src
+              ON (tgt.SERVER_ID = src.server_id AND tgt.SERVICE_NAME = src.service_name)
+              WHEN MATCHED THEN
+                UPDATE SET tgt.SERVICE_TYPE = '{{ svc_disc_rhel_svc.service_type }}',
+                           tgt.TECHNOLOGY   = '{{ svc_disc_rhel_svc.technology }}'
+              WHEN NOT MATCHED THEN
+                INSERT (SERVICE_ID, SERVER_ID, SERVICE_NAME, SERVICE_TYPE, TECHNOLOGY)
+                VALUES ({{ svc_disc_rhel_oracle_schema }}.OBS_SERVICE_SEQ.NEXTVAL,
+                        '{{ svc_disc_rhel_server_id }}',
+                        '{{ svc_disc_rhel_svc.service_name | replace("'", "''") }}',
+                        '{{ svc_disc_rhel_svc.service_type }}',
+                        '{{ svc_disc_rhel_svc.technology }}')
+          environment:
+            ORACLE_HOME: /opt/oracle/instantclient
+            LD_LIBRARY_PATH: /opt/oracle/instantclient
+          vars:
+            ansible_python_interpreter: /usr/bin/python3
+          no_log: false
+          delegate_to: "{{ svc_disc_rhel_oracle_db_node }}"
+          tags: [oracle_insert, services]
+
+        - name: Svc_disc_rhel | Oracle | SELECT SERVICE_ID — {{ svc_disc_rhel_svc.service_name }}
+          opitzconsulting.ansible_oracle.oracle_sql:
+            hostname: "{{ svc_disc_rhel_oracle_host }}"
+            port: "{{ svc_disc_rhel_oracle_port }}"
+            service_name: "{{ svc_disc_rhel_oracle_service }}"
+            username: "{{ svc_disc_rhel_oracle_user }}"
+            password: "{{ svc_disc_rhel_oracle_password }}"
+            mode: "sysdba"
+            sql: >-
+              SELECT SERVICE_ID FROM {{ svc_disc_rhel_oracle_schema }}.OBS_SERVICE
+              WHERE SERVER_ID = '{{ svc_disc_rhel_server_id }}'
+              AND SERVICE_NAME = '{{ svc_disc_rhel_svc.service_name | replace("'", "''") }}'
+          environment:
+            ORACLE_HOME: /opt/oracle/instantclient
+            LD_LIBRARY_PATH: /opt/oracle/instantclient
+          vars:
+            ansible_python_interpreter: /usr/bin/python3
+          no_log: false
+          register: svc_disc_rhel_svc_id_result
+          delegate_to: "{{ svc_disc_rhel_oracle_db_node }}"
+          tags: [oracle_insert, services]
+
+        - name: Svc_disc_rhel | Oracle | Guardar svc_disc_rhel_current_service_id
+          ansible.builtin.set_fact:
+            svc_disc_rhel_current_service_id: >-
+              {{ svc_disc_rhel_svc_id_result.results[0].SERVICE_ID | default(none) }}
+            cacheable: false
+          tags: [oracle_insert, services]
+
+        - name: Svc_disc_rhel | Oracle | Construir SQL INSERT OBS_SERVICE_LOG
+          ansible.builtin.set_fact:
+            cacheable: false
+            svc_disc_rhel_log_sql: >-
+              INSERT INTO {{ svc_disc_rhel_oracle_schema }}.OBS_SERVICE_LOG
+              (LOG_ID, BATCH_ID, SERVER_ID, SERVICE_ID, COLLECTION_TIMESTAMP,
+               PID, RUNNING_USER, BINARY_PATH, VERSION_DETECTED,
+               UPTIME_SECONDS, CPU_USAGE_PERCENT, MEMORY_USAGE_MB,
+               PROTOCOL, SERVICE_STATUS, SEVERITY,
+               LAST_STATE_CHANGE_TIMESTAMP, LISTENING_PORTS)
+              VALUES
+              ({{ svc_disc_rhel_oracle_schema }}.OBS_SERVICE_LOG_SEQ.NEXTVAL,
+               '{{ svc_disc_rhel_batch_id }}',
+               '{{ svc_disc_rhel_server_id }}',
+               {{ svc_disc_rhel_current_service_id | default('NULL') }},
+               SYSTIMESTAMP,
+               {{ svc_disc_rhel_svc.pid | default(none) if svc_disc_rhel_svc.pid | default(none) is not none else 'NULL' }},
+               {{ ("'" ~ (svc_disc_rhel_svc.running_user | default('') | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.running_user | default(none) is not none else 'NULL' }},
+               {{ ("'" ~ (svc_disc_rhel_svc.binary_path | default('') | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.binary_path | default(none) is not none else 'NULL' }},
+               {{ ("'" ~ (svc_disc_rhel_svc.version_detected | default('') | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.version_detected | default(none) is not none else 'NULL' }},
+               {{ svc_disc_rhel_svc.uptime_seconds | default(none) if svc_disc_rhel_svc.uptime_seconds | default(none) is not none else 'NULL' }},
+               {{ svc_disc_rhel_svc.cpu_usage_percent | default(none) if svc_disc_rhel_svc.cpu_usage_percent | default(none) is not none else 'NULL' }},
+               {{ svc_disc_rhel_svc.memory_usage_mb | default(none) if svc_disc_rhel_svc.memory_usage_mb | default(none) is not none else 'NULL' }},
+               {{ ("'" ~ (svc_disc_rhel_svc.protocol | default('') | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.protocol | default(none) is not none else 'NULL' }},
+               '{{ svc_disc_rhel_svc.service_status }}',
+               '{{ svc_disc_rhel_svc.severity }}',
+               {{ ("'" ~ (svc_disc_rhel_svc.last_state_change_timestamp | default('') | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.last_state_change_timestamp | default(none) is not none else 'NULL' }},
+               {{ ("'" ~ (svc_disc_rhel_svc.listening_ports | default([]) | join(',') | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.listening_ports | default(none) is not none and svc_disc_rhel_svc.listening_ports | default([]) | length > 0 else 'NULL' }})
+          tags: [oracle_insert, services]
+
+        - name: Svc_disc_rhel | Oracle | INSERT OBS_SERVICE_LOG — {{ svc_disc_rhel_svc.service_name }}
+          opitzconsulting.ansible_oracle.oracle_sql:
+            hostname: "{{ svc_disc_rhel_oracle_host }}"
+            port: "{{ svc_disc_rhel_oracle_port }}"
+            service_name: "{{ svc_disc_rhel_oracle_service }}"
+            username: "{{ svc_disc_rhel_oracle_user }}"
+            password: "{{ svc_disc_rhel_oracle_password }}"
+            mode: "sysdba"
+            sql: "{{ svc_disc_rhel_log_sql }}"
+          environment:
+            ORACLE_HOME: /opt/oracle/instantclient
+            LD_LIBRARY_PATH: /opt/oracle/instantclient
+          vars:
+            ansible_python_interpreter: /usr/bin/python3
+          no_log: false
+          delegate_to: "{{ svc_disc_rhel_oracle_db_node }}"
+          tags: [oracle_insert, services]
+
+      rescue:
+        - name: Svc_disc_rhel | Oracle | ERROR — {{ svc_disc_rhel_svc.service_name }}
+          ansible.builtin.debug:
+            msg: >-
+              [ERROR] svc_disc_rhel — No se pudo persistir {{ svc_disc_rhel_svc.service_name }}
+              en {{ inventory_hostname }}.
+              {{ ansible_failed_result.msg | default('desconocido') }}
+          tags: [oracle_insert, services]
+
+  rescue:
+    - name: Svc_disc_rhel | Oracle | ERROR en bloque de persistencia
+      ansible.builtin.debug:
+        msg: >-
+          [ERROR] svc_disc_rhel — Bloque Oracle falló para {{ inventory_hostname }}.
+          {{ ansible_failed_result.msg | default('desconocido') }}
+      tags: [oracle_insert]

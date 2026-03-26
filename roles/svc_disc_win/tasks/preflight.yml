@@ -1,0 +1,128 @@
+---
+# =============================================================================
+# roles/svc_disc_win/tasks/preflight.yml
+# Validación pre-ejecución — idéntica a RHEL pero con prefijo svc_disc_win_
+# =============================================================================
+
+- name: Svc_disc_win | preflight | Validar pre-requisitos Oracle
+  block:
+    - name: Svc_disc_win | preflight | Verificar que oracle_db_node es alcanzable
+      ansible.builtin.wait_for:
+        host: "{{ svc_disc_win_oracle_host }}"
+        port: "{{ svc_disc_win_oracle_port }}"
+        timeout: 10
+        state: started
+      delegate_to: "{{ svc_disc_win_oracle_db_node }}"
+      run_once: true
+      tags: [preflight]
+
+    - name: Svc_disc_win | preflight | Verificar credenciales Oracle
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ svc_disc_win_oracle_host }}"
+        port: "{{ svc_disc_win_oracle_port }}"
+        service_name: "{{ svc_disc_win_oracle_service }}"
+        username: "{{ svc_disc_win_oracle_user }}"
+        password: "{{ svc_disc_win_oracle_password }}"
+        mode: "sysdba"
+        sql: "SELECT 1 FROM dual"
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ svc_disc_win_oracle_db_node }}"
+      run_once: true
+      register: svc_disc_win_preflight_login
+      tags: [preflight]
+
+    - name: Svc_disc_win | preflight | Verificar tablas del esquema
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ svc_disc_win_oracle_host }}"
+        port: "{{ svc_disc_win_oracle_port }}"
+        service_name: "{{ svc_disc_win_oracle_service }}"
+        username: "{{ svc_disc_win_oracle_user }}"
+        password: "{{ svc_disc_win_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          SELECT table_name FROM dba_tables
+          WHERE owner = UPPER('{{ svc_disc_win_oracle_schema }}')
+          AND table_name IN ('OBS_BATCH_EXECUTION','OBS_SERVER','OBS_SERVICE','OBS_SERVICE_LOG')
+          ORDER BY table_name
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ svc_disc_win_oracle_db_node }}"
+      run_once: true
+      register: svc_disc_win_preflight_tables
+      tags: [preflight]
+
+    - name: Svc_disc_win | preflight | Validar que las 4 tablas existen
+      ansible.builtin.assert:
+        that:
+          - svc_disc_win_preflight_tables.results | default([]) | length > 0
+          - svc_disc_win_preflight_tables.results | length == 4
+        fail_msg: >-
+          [FATAL] svc_disc_win — Faltan tablas en {{ svc_disc_win_oracle_schema }}.
+          Encontradas: {{ svc_disc_win_preflight_tables.results | default('ninguna') }}.
+          Ejecute ddl_changes.sql antes de continuar.
+        success_msg: >-
+          Preflight OK — Las 4 tablas del esquema {{ svc_disc_win_oracle_schema }} existen.
+      run_once: true
+      tags: [preflight]
+
+    - name: Svc_disc_win | preflight | Verificar secuencias
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ svc_disc_win_oracle_host }}"
+        port: "{{ svc_disc_win_oracle_port }}"
+        service_name: "{{ svc_disc_win_oracle_service }}"
+        username: "{{ svc_disc_win_oracle_user }}"
+        password: "{{ svc_disc_win_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          SELECT sequence_name FROM dba_sequences
+          WHERE sequence_owner = UPPER('{{ svc_disc_win_oracle_schema }}')
+          AND sequence_name IN ('OBS_SERVICE_SEQ','OBS_SERVICE_LOG_SEQ')
+          ORDER BY sequence_name
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ svc_disc_win_oracle_db_node }}"
+      run_once: true
+      register: svc_disc_win_preflight_seqs
+      tags: [preflight]
+
+    - name: Svc_disc_win | preflight | Validar que las 2 secuencias existen
+      ansible.builtin.assert:
+        that:
+          - svc_disc_win_preflight_seqs.results | default([]) | length > 0
+          - svc_disc_win_preflight_seqs.results | length == 2
+        fail_msg: >-
+          [FATAL] svc_disc_win — Faltan secuencias en {{ svc_disc_win_oracle_schema }}.
+          Ejecute ddl_changes.sql antes de continuar.
+        success_msg: >-
+          Preflight OK — OBS_SERVICE_SEQ y OBS_SERVICE_LOG_SEQ existen.
+      run_once: true
+      tags: [preflight]
+
+    - name: Svc_disc_win | preflight | Marcar validación exitosa
+      ansible.builtin.set_fact:
+        svc_disc_win_preflight_passed: true
+        cacheable: false
+      tags: [preflight]
+
+  rescue:
+    - name: Svc_disc_win | preflight | FATAL — validación fallida
+      ansible.builtin.fail:
+        msg: >-
+          [FATAL] svc_disc_win — Preflight falló. No se puede continuar.
+          Verifique: 1) oracle_db_node alcanzable, 2) credenciales svc_disc_win_oracle_*,
+          3) esquema {{ svc_disc_win_oracle_schema }} con tablas y secuencias.
+          Error: {{ ansible_failed_result.msg | default('desconocido') }}
+      tags: [preflight]

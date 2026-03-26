@@ -1,0 +1,10 @@
+---
+# =============================================================================
+# playbook_windows.yml — SENTINEL para Windows Server 2016 / 2019 / 2022
+# =============================================================================
+
+- name: SENTINEL — Descubrimiento de servicios y procesos Java en Windows
+  hosts: windows_servers
+  gather_facts: true
+  roles:
+    - role: svc_disc_win

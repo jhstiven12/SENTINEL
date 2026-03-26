@@ -1,0 +1,124 @@
+---
+# =============================================================================
+# roles/svc_disc_win/tasks/docker_detection.yml
+# Detección de Docker Desktop / Docker Engine y contenedores en Windows.
+#
+# Variables producidas:
+#   svc_disc_win_docker_services — lista en formato canónico
+# =============================================================================
+
+- name: Svc_disc_win | docker | Detectar Docker Engine en Windows
+  block:
+    - name: Svc_disc_win | docker | Verificar Docker disponible y listar contenedores
+      ansible.windows.win_shell:
+        _raw_params: |
+          $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
+          if (-not $dockerCmd) { Write-Output "[]"; return }
+
+          $version = (docker version --format '{% raw %}{{.Server.Version}}{% endraw %}' 2>$null)
+          $r = @()
+          docker ps --no-trunc --format '{% raw %}{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}{% endraw %}' 2>$null | ForEach-Object {
+            $cols = $_ -split '\|'
+            if ($cols.Count -ge 5) {
+              $r += [PSCustomObject]@{
+                ContainerID = $cols[0]
+                Name        = $cols[1]
+                Image       = $cols[2]
+                Status      = $cols[3]
+                Ports       = $cols[4]
+                Version     = $version
+              }
+            }
+          }
+
+          # Obtener stats (CPU/mem)
+          $stats = @{}
+          docker stats --no-stream --no-trunc --format '{% raw %}{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}{% endraw %}' 2>$null | ForEach-Object {
+            $s = $_ -split '\|'
+            if ($s.Count -ge 3) {
+              $stats[$s[0].Trim()] = @{
+                CPU = ($s[1].Trim() -replace '%','')
+                Mem = (($s[2].Trim() -split '/')[0].Trim() -replace '[A-Za-z]+','')
+              }
+            }
+          }
+
+          foreach ($c in $r) {
+            $st = $stats[$c.Name]
+            if ($st) { $c | Add-Member -NotePropertyName CPUUsage -NotePropertyValue $st.CPU
+                       $c | Add-Member -NotePropertyName MemoryMB -NotePropertyValue $st.Mem }
+            else     { $c | Add-Member -NotePropertyName CPUUsage -NotePropertyValue $null
+                       $c | Add-Member -NotePropertyName MemoryMB -NotePropertyValue $null }
+          }
+
+          if ($r.Count -gt 0) { $r | ConvertTo-Json -Depth 3 -Compress }
+          else { Write-Output "[]" }
+      register: svc_disc_win_docker_raw
+      changed_when: false
+      timeout: "{{ svc_disc_win_discovery_timeout }}"
+      tags: [discovery, docker]
+
+  rescue:
+    - name: Svc_disc_win | docker | ERROR en detección Docker
+      ansible.builtin.debug:
+        msg: "[ERROR] svc_disc_win — Docker detect: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, docker]
+
+  always:
+    - name: Svc_disc_win | docker | Garantizar svc_disc_win_docker_raw
+      ansible.builtin.set_fact:
+        svc_disc_win_docker_raw: "{{ svc_disc_win_docker_raw | default({'stdout': '[]'}) }}"
+        cacheable: false
+      tags: [discovery, docker]
+
+- name: Svc_disc_win | docker | Construir svc_disc_win_docker_services
+  ansible.builtin.set_fact:
+    svc_disc_win_docker_services: >-
+      {%- set ns  = namespace(svcs=[]) -%}
+      {%- set raw = (svc_disc_win_docker_raw.stdout | default('[]') | trim | from_json)
+                    if (svc_disc_win_docker_raw.stdout | default('') | trim | length > 2) else [] -%}
+      {%- for c in raw -%}
+        {%- set cname  = c.Name | default('unknown') -%}
+        {%- set status = c.Status | default('') -%}
+
+        {%- set ports_list = [] -%}
+        {%- set ports_str  = c.Ports | default('') -%}
+        {%- if ports_str | length > 0 -%}
+          {%- for p in ports_str.split(',') -%}
+            {%- set pp = p | trim -%}
+            {%- if ':' in pp -%}
+              {%- set host_port = pp.split(':')[-1].split('->')[0] -%}
+              {%- set _ = ports_list.append({'protocol': 'TCP', 'port': host_port}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+
+        {%- set _ = ns.svcs.append({
+          'service_name': ('docker-' ~ cname) | truncate(200, true, ''),
+          'service_type': 'CONTAINER',
+          'technology': 'DOCKER',
+          'pid': none,
+          'running_user': none,
+          'binary_path': c.Image | default(none),
+          'version_detected': c.Version | default(none),
+          'uptime_seconds': none,
+          'cpu_usage_percent': c.CPUUsage | default(none),
+          'memory_usage_mb': c.MemoryMB | default(none),
+          'protocol': 'TCP' if ports_list | length > 0 else none,
+          'listening_ports': ports_list | to_json if ports_list | length > 0 else none,
+          'service_status': 'RUNNING' if 'Up' in status else 'STOPPED',
+          'severity': svc_disc_win_severity_running if 'Up' in status
+                       else svc_disc_win_severity_stopped,
+          'last_state_change_timestamp': none
+        }) -%}
+      {%- endfor -%}
+      {{ ns.svcs }}
+    cacheable: false
+  tags: [discovery, docker]
+
+- name: Svc_disc_win | docker | Resumen contenedores en {{ inventory_hostname }}
+  ansible.builtin.debug:
+    msg: >-
+      svc_disc_win — Detectados {{ svc_disc_win_docker_services | default([]) | length }}
+      contenedor(es) Docker en {{ inventory_hostname }}.
+  tags: [discovery, docker]

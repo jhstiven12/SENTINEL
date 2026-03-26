@@ -1,0 +1,266 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/tasks/db_detection.yml
+# Detección profunda de motores de base de datos en RHEL:
+#   - Oracle Database (pmon, listener)
+#   - PostgreSQL (postmaster/postgres)
+#   - MySQL / MariaDB (mysqld)
+#   - MongoDB (mongod / mongos)
+#   - SQL Server en Linux (sqlservr)
+#
+# Detecta procesos que pueden NO estar registrados como servicio systemd
+# (instalaciones manuales, Oracle Grid, contenedores, etc.)
+#
+# Variables producidas:
+#   svc_disc_rhel_db_services — lista en formato canónico _sentinel_services
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Recolectar procesos DB con ps en un solo comando
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | db | Detectar procesos de bases de datos
+  block:
+    - name: Svc_disc_rhel | db | ps — buscar procesos DB conocidos
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ps -eo pid,user,pcpu,rss,etime,args --no-headers 2>/dev/null |
+          awk '
+            /ora_pmon_/  ||
+            /tnslsnr/    ||
+            /postgres/   ||
+            /postmaster/ ||
+            /mysqld/     ||
+            /mariadbd/   ||
+            /mongod/     ||
+            /mongos/     ||
+            /sqlservr/   {
+              print $1"|"$2"|"$3"|"$4"|"$5"|"substr($0, index($0,$6))
+            }
+          '
+        executable: /bin/bash
+      register: svc_disc_rhel_db_ps_raw
+      changed_when: false
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery, database]
+
+  rescue:
+    - name: Svc_disc_rhel | db | ERROR en ps DB
+      ansible.builtin.debug:
+        msg: "[ERROR] svc_disc_rhel — DB detect: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, database]
+
+  always:
+    - name: Svc_disc_rhel | db | Garantizar svc_disc_rhel_db_ps_raw
+      ansible.builtin.set_fact:
+        svc_disc_rhel_db_ps_raw: "{{ svc_disc_rhel_db_ps_raw | default({'stdout_lines': []}) }}"
+        cacheable: false
+      tags: [discovery, database]
+
+# ---------------------------------------------------------------------------
+# 2. Obtener versiones de cada motor (best-effort)
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | db | Detectar versiones de motores DB
+  block:
+    - name: Svc_disc_rhel | db | Versión Oracle (sqlplus)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          su - {{ svc_disc_rhel_db_ora_user_item }} -c \
+          "echo 'SELECT banner FROM v\$version WHERE ROWNUM=1;' | \
+          sqlplus -S / as sysdba 2>/dev/null" | grep -i 'Oracle' | head -1 || true
+        executable: /bin/bash
+      register: svc_disc_rhel_db_ora_ver_raw
+      changed_when: false
+      loop: >-
+        {{ svc_disc_rhel_db_ps_raw.stdout_lines | default([])
+           | select('search', 'ora_pmon_')
+           | map('regex_replace', '^[^|]*\|([^|]*)\|.*', '\1')
+           | list | unique }}
+      loop_control:
+        loop_var: svc_disc_rhel_db_ora_user_item
+        label: "oracle@{{ svc_disc_rhel_db_ora_user_item }}"
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 15
+      tags: [discovery, database]
+
+    - name: Svc_disc_rhel | db | Versión PostgreSQL  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          postgres --version 2>/dev/null | head -1 || true
+        executable: /bin/bash
+      register: svc_disc_rhel_db_pg_ver
+      changed_when: false
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 10
+      tags: [discovery, database]
+
+    - name: Svc_disc_rhel | db | Versión MySQL/MariaDB  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          mysqld --version 2>/dev/null | head -1 || true
+        executable: /bin/bash
+      register: svc_disc_rhel_db_mysql_ver
+      changed_when: false
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 10
+      tags: [discovery, database]
+
+    - name: Svc_disc_rhel | db | Versión MongoDB  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          mongod --version 2>/dev/null | head -1 || true
+        executable: /bin/bash
+      register: svc_disc_rhel_db_mongo_ver
+      changed_when: false
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 10
+      tags: [discovery, database]
+
+    - name: Svc_disc_rhel | db | Versión SQL Server  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          /opt/mssql/bin/sqlservr --version 2>/dev/null | head -1 || true
+        executable: /bin/bash
+      register: svc_disc_rhel_db_mssql_ver
+      changed_when: false
+      ignore_errors: true   # noqa: ignore-errors
+      timeout: 10
+      tags: [discovery, database]
+
+  rescue:
+    - name: Svc_disc_rhel | db | ERROR en detección de versiones
+      ansible.builtin.debug:
+        msg: "[WARN] svc_disc_rhel — DB version detect best-effort: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, database]
+
+# ---------------------------------------------------------------------------
+# 3. Normalizar en svc_disc_rhel_db_services
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | db | Construir svc_disc_rhel_db_services
+  ansible.builtin.set_fact:
+    svc_disc_rhel_db_services: >-
+      {%- set ns = namespace(svcs=[]) -%}
+      {%- set known_pids = svc_disc_rhel_parsed_services | default([])
+                           | map(attribute='MainPID', default='0')
+                           | map('trim') | list -%}
+
+      {%- set ora_ver = svc_disc_rhel_db_ora_ver_raw.results[0].stdout | default('')
+                          | trim if svc_disc_rhel_db_ora_ver_raw is defined
+                          and svc_disc_rhel_db_ora_ver_raw.results | default([]) | length > 0
+                          else '' -%}
+      {%- set pg_ver = svc_disc_rhel_db_pg_ver.stdout | default('') | trim -%}
+      {%- set mysql_ver = svc_disc_rhel_db_mysql_ver.stdout | default('') | trim -%}
+      {%- set mongo_ver = svc_disc_rhel_db_mongo_ver.stdout | default('') | trim -%}
+      {%- set mssql_ver = svc_disc_rhel_db_mssql_ver.stdout | default('') | trim -%}
+
+      {%- for line in svc_disc_rhel_db_ps_raw.stdout_lines | default([]) -%}
+        {%- set cols = line.split('|') -%}
+        {%- if cols|length >= 6 -%}
+          {%- set pid = cols[0]|trim -%}
+          {%- set user = cols[1]|trim -%}
+          {%- set cpu = cols[2]|trim -%}
+          {%- set rss_kb = cols[3]|trim -%}
+          {%- set etime = cols[4]|trim -%}
+          {%- set cmdline = cols[5:]|join('|')|trim -%}
+
+          {%- if pid not in known_pids -%}
+
+            {# ── Clasificar motor ── #}
+            {%- set svc_name = 'db-process-' ~ pid -%}
+            {%- set svc_type = 'DATABASE' -%}
+            {%- set tech = 'UNKNOWN' -%}
+            {%- set version = none -%}
+
+            {%- if 'ora_pmon_' in cmdline -%}
+              {%- set sid = cmdline.split('ora_pmon_')[1].split()[0] | default('ORCL') -%}
+              {%- set svc_name = 'oracle-db-' ~ sid -%}
+              {%- set tech = 'ORACLE' -%}
+              {%- set version = ora_ver[:200] if ora_ver|length > 0 else none -%}
+            {%- elif 'tnslsnr' in cmdline -%}
+              {%- set lsnr_name = cmdline.split('tnslsnr')[1].split()[0] | default('LISTENER') | trim -%}
+              {%- set svc_name = 'oracle-listener-' ~ lsnr_name -%}
+              {%- set tech = 'ORACLE' -%}
+              {%- set svc_type = 'DATABASE_LISTENER' -%}
+              {%- set version = ora_ver[:200] if ora_ver|length > 0 else none -%}
+            {%- elif 'postgres' in cmdline or 'postmaster' in cmdline -%}
+              {%- set svc_name = 'postgresql' -%}
+              {%- set tech = 'POSTGRESQL' -%}
+              {%- set version = pg_ver[:200] if pg_ver|length > 0 else none -%}
+            {%- elif 'mysqld' in cmdline or 'mariadbd' in cmdline -%}
+              {%- if 'mariadbd' in cmdline -%}
+                {%- set svc_name = 'mariadb' -%}
+                {%- set tech = 'MARIADB' -%}
+              {%- else -%}
+                {%- set svc_name = 'mysql' -%}
+                {%- set tech = 'MYSQL' -%}
+              {%- endif -%}
+              {%- set version = mysql_ver[:200] if mysql_ver|length > 0 else none -%}
+            {%- elif 'mongod' in cmdline or 'mongos' in cmdline -%}
+              {%- if 'mongos' in cmdline -%}
+                {%- set svc_name = 'mongodb-router' -%}
+              {%- else -%}
+                {%- set svc_name = 'mongodb' -%}
+              {%- endif -%}
+              {%- set tech = 'MONGODB' -%}
+              {%- set version = mongo_ver[:200] if mongo_ver|length > 0 else none -%}
+            {%- elif 'sqlservr' in cmdline -%}
+              {%- set svc_name = 'mssql-server' -%}
+              {%- set tech = 'MSSQLSERVER' -%}
+              {%- set version = mssql_ver[:200] if mssql_ver|length > 0 else none -%}
+            {%- endif -%}
+
+            {# ── Mem / Uptime ── #}
+            {%- set mem_mb = (rss_kb|float / 1024)|round(2) if rss_kb|length > 0 else none -%}
+            {%- set uptime = none -%}
+            {%- if etime|length > 0 -%}
+              {%- set parts = etime.split('-') -%}
+              {%- set days = parts[0]|int if parts|length == 2 else 0 -%}
+              {%- set hms = parts[-1].split(':') -%}
+              {%- if   hms|length == 3 -%}{%- set uptime = days*86400 + hms[0]|int*3600 + hms[1]|int*60 + hms[2]|int -%}
+              {%- elif hms|length == 2 -%}{%- set uptime = days*86400 + hms[0]|int*60   + hms[1]|int -%}
+              {%- else                 -%}{%- set uptime = hms[0]|int -%}
+              {%- endif -%}
+            {%- endif -%}
+
+            {# ── Puertos ── #}
+            {%- set pid_ports = (svc_disc_rhel_pid_ports | default({}))[pid] | default([]) -%}
+            {%- set protocol = pid_ports[0].get('protocol',none) if pid_ports|length > 0 else none -%}
+            {%- set ports_json = pid_ports|to_json if pid_ports|length > 0 else none -%}
+
+            {%- set binary = cmdline.split()[0] | default(none) -%}
+
+            {%- set _ = ns.svcs.append({
+              'service_name': svc_name | truncate(200, true, ''),
+              'service_type': svc_type,
+              'technology': tech,
+              'pid': pid,
+              'running_user': user,
+              'binary_path': binary,
+              'version_detected': version,
+              'uptime_seconds': uptime,
+              'cpu_usage_percent': cpu,
+              'memory_usage_mb': mem_mb,
+              'protocol': protocol,
+              'listening_ports': ports_json,
+              'service_status': 'RUNNING',
+              'severity': svc_disc_rhel_severity_running,
+              'last_state_change_timestamp': none
+            }) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.svcs }}
+    cacheable: false
+  tags: [discovery, database]
+
+- name: Svc_disc_rhel | db | Resumen DB en {{ inventory_hostname }}
+  ansible.builtin.debug:
+    msg: >-
+      svc_disc_rhel — Detectados {{ svc_disc_rhel_db_services | default([]) | length }}
+      proceso(s) DB adicional(es) en {{ inventory_hostname }}.
+  tags: [discovery, database]

@@ -1,0 +1,154 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/tasks/preflight.yml
+# Validación pre-ejecución — falla rápido antes de desperdiciar tiempo en
+# discovery si Oracle no está alcanzable o las credenciales son incorrectas.
+#
+# Valida:
+#   1. Conectividad al nodo Oracle (oracle_db_node alcanzable)
+#   2. Credenciales Oracle (login exitoso)
+#   3. Esquema y tablas existen (OBS_BATCH_EXECUTION, OBS_SERVER, OBS_SERVICE, OBS_SERVICE_LOG)
+#   4. Secuencias existen (OBS_SERVICE_SEQ, OBS_SERVICE_LOG_SEQ)
+#
+# Variables producidas:
+#   svc_disc_rhel_preflight_passed — true/false
+# =============================================================================
+
+- name: Svc_disc_rhel | Preflight | Validar pre-requisitos Oracle
+  block:
+    # ------------------------------------------------------------------
+    # 1. Conectividad al oracle_db_node
+    # ------------------------------------------------------------------
+    - name: Svc_disc_rhel | Preflight | Verificar que oracle_db_node es alcanzable
+      ansible.builtin.wait_for:
+        host: "{{ svc_disc_rhel_oracle_host }}"
+        port: "{{ svc_disc_rhel_oracle_port }}"
+        timeout: 10
+        state: started
+      delegate_to: "{{ svc_disc_rhel_oracle_db_node }}"
+      run_once: true
+      tags: [preflight]
+
+    # ------------------------------------------------------------------
+    # 2. Credenciales Oracle válidas
+    # ------------------------------------------------------------------
+    - name: Svc_disc_rhel | Preflight | Verificar credenciales Oracle
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ svc_disc_rhel_oracle_host }}"
+        port: "{{ svc_disc_rhel_oracle_port }}"
+        service_name: "{{ svc_disc_rhel_oracle_service }}"
+        username: "{{ svc_disc_rhel_oracle_user }}"
+        password: "{{ svc_disc_rhel_oracle_password }}"
+        mode: "sysdba"
+        sql: "SELECT 1 FROM dual"
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ svc_disc_rhel_oracle_db_node }}"
+      run_once: true
+      register: svc_disc_rhel_preflight_login
+      tags: [preflight]
+
+    # ------------------------------------------------------------------
+    # 3. Tablas del esquema existen
+    # ------------------------------------------------------------------
+    - name: Svc_disc_rhel | Preflight | Verificar tablas del esquema
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ svc_disc_rhel_oracle_host }}"
+        port: "{{ svc_disc_rhel_oracle_port }}"
+        service_name: "{{ svc_disc_rhel_oracle_service }}"
+        username: "{{ svc_disc_rhel_oracle_user }}"
+        password: "{{ svc_disc_rhel_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          SELECT table_name FROM dba_tables
+          WHERE owner = UPPER('{{ svc_disc_rhel_oracle_schema }}')
+          AND table_name IN ('OBS_BATCH_EXECUTION','OBS_SERVER','OBS_SERVICE','OBS_SERVICE_LOG')
+          ORDER BY table_name
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ svc_disc_rhel_oracle_db_node }}"
+      run_once: true
+      register: svc_disc_rhel_preflight_tables
+      tags: [preflight]
+
+    - name: Svc_disc_rhel | Preflight | Validar que las 4 tablas existen
+      ansible.builtin.assert:
+        that:
+          - svc_disc_rhel_preflight_tables.results | default([]) | length > 0
+          - svc_disc_rhel_preflight_tables.results | length == 4
+        fail_msg: >-
+          [FATAL] svc_disc_rhel — Faltan tablas en {{ svc_disc_rhel_oracle_schema }}.
+          Encontradas: {{ svc_disc_rhel_preflight_tables.results | default('ninguna') }}.
+          Ejecute ddl_changes.sql antes de continuar.
+        success_msg: >-
+          Preflight OK — Las 4 tablas del esquema {{ svc_disc_rhel_oracle_schema }} existen.
+      run_once: true
+      tags: [preflight]
+
+    # ------------------------------------------------------------------
+    # 4. Secuencias existen
+    # ------------------------------------------------------------------
+    - name: Svc_disc_rhel | Preflight | Verificar secuencias
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ svc_disc_rhel_oracle_host }}"
+        port: "{{ svc_disc_rhel_oracle_port }}"
+        service_name: "{{ svc_disc_rhel_oracle_service }}"
+        username: "{{ svc_disc_rhel_oracle_user }}"
+        password: "{{ svc_disc_rhel_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          SELECT sequence_name FROM dba_sequences
+          WHERE sequence_owner = UPPER('{{ svc_disc_rhel_oracle_schema }}')
+          AND sequence_name IN ('OBS_SERVICE_SEQ','OBS_SERVICE_LOG_SEQ')
+          ORDER BY sequence_name
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ svc_disc_rhel_oracle_db_node }}"
+      run_once: true
+      register: svc_disc_rhel_preflight_seqs
+      tags: [preflight]
+
+    - name: Svc_disc_rhel | Preflight | Validar que las 2 secuencias existen
+      ansible.builtin.assert:
+        that:
+          - svc_disc_rhel_preflight_seqs.results | default([]) | length > 0
+          - svc_disc_rhel_preflight_seqs.results | length == 2
+        fail_msg: >-
+          [FATAL] svc_disc_rhel — Faltan secuencias en {{ svc_disc_rhel_oracle_schema }}.
+          Encontradas: {{ svc_disc_rhel_preflight_seqs.results | default('ninguna') }}.
+          Ejecute ddl_changes.sql antes de continuar.
+        success_msg: >-
+          Preflight OK — OBS_SERVICE_SEQ y OBS_SERVICE_LOG_SEQ existen.
+      run_once: true
+      tags: [preflight]
+
+    # ------------------------------------------------------------------
+    # Marcar preflight OK
+    # ------------------------------------------------------------------
+    - name: Svc_disc_rhel | Preflight | Marcar validación exitosa
+      ansible.builtin.set_fact:
+        svc_disc_rhel_preflight_passed: true
+        cacheable: false
+      tags: [preflight]
+
+  rescue:
+    - name: Svc_disc_rhel | Preflight | FATAL — validación fallida
+      ansible.builtin.fail:
+        msg: >-
+          [FATAL] svc_disc_rhel — Preflight falló. No se puede continuar.
+          Verifique: 1) oracle_db_node alcanzable, 2) credenciales svc_disc_rhel_oracle_*,
+          3) esquema {{ svc_disc_rhel_oracle_schema }} con tablas y secuencias.
+          Error: {{ ansible_failed_result.msg | default('desconocido') }}
+      tags: [preflight]

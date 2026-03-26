@@ -1,0 +1,7 @@
+---
+profile: production
+exclude_paths:
+  # Test playbook usa opitzconsulting.ansible_oracle que se instala en el EE,
+  # no en el entorno de desarrollo local
+  - playbook_test_oracle.yml
+warn_list: []

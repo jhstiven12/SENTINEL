@@ -1,0 +1,157 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/tasks/pm2_detection.yml
+# Detecta aplicaciones gestionadas por PM2 (Node.js process manager).
+#
+# Estrategia:
+#   1. Busca usuarios que tengan PM2 daemon activo (via pgrep PM2)
+#   2. Por cada usuario ejecuta "pm2 jlist" para obtener JSON detallado
+#   3. Extrae nombre, PID, estado, CPU, memoria, uptime, script path
+#   4. Cruza con svc_disc_rhel_pid_ports para asociar puertos
+#   5. Excluye PIDs ya cubiertos por systemd
+#
+# Variables producidas:
+#   svc_disc_rhel_pm2_services — lista en formato canónico _sentinel_services
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Detectar si PM2 existe y listar aplicaciones
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | pm2 | Detectar procesos PM2 y listar apps
+  block:
+    - name: Svc_disc_rhel | pm2 | Buscar binario pm2 disponible  # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          which pm2 2>/dev/null ||
+          find /usr/local/bin /usr/bin /home -maxdepth 4 -name pm2 -type f 2>/dev/null |
+          head -1
+        executable: /bin/bash
+      register: svc_disc_rhel_pm2_bin
+      changed_when: false
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery, pm2]
+
+    - name: Svc_disc_rhel | pm2 | Listar usuarios con PM2 daemon activo
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ps -eo user,args --no-headers 2>/dev/null |
+          awk '/PM2.*God Daemon/ && !seen[$1]++ {print $1}'
+        executable: /bin/bash
+      register: svc_disc_rhel_pm2_users
+      changed_when: false
+      when: svc_disc_rhel_pm2_bin.stdout | default('') | trim | length > 0
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery, pm2]
+
+    - name: Svc_disc_rhel | pm2 | Obtener jlist por cada usuario PM2
+      ansible.builtin.shell:
+        cmd: >
+          sudo -u {{ svc_disc_rhel_pm2_user_item }}
+          {{ svc_disc_rhel_pm2_bin.stdout | trim }} jlist 2>/dev/null || echo "[]"
+        executable: /bin/bash
+      register: svc_disc_rhel_pm2_jlist_raw
+      changed_when: false
+      loop: "{{ svc_disc_rhel_pm2_users.stdout_lines | default([]) }}"
+      loop_control:
+        loop_var: svc_disc_rhel_pm2_user_item
+        label: "pm2@{{ svc_disc_rhel_pm2_user_item }}"
+      when: svc_disc_rhel_pm2_users.stdout_lines | default([]) | length > 0
+      timeout: "{{ svc_disc_rhel_discovery_timeout }}"
+      tags: [discovery, pm2]
+
+  rescue:
+    - name: Svc_disc_rhel | pm2 | ERROR en detección PM2
+      ansible.builtin.debug:
+        msg: "[ERROR] svc_disc_rhel — PM2 detect: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, pm2]
+
+  always:
+    - name: Svc_disc_rhel | pm2 | Garantizar variables PM2
+      ansible.builtin.set_fact:
+        svc_disc_rhel_pm2_jlist_raw: "{{ svc_disc_rhel_pm2_jlist_raw | default({'results': []}) }}"
+        cacheable: false
+      tags: [discovery, pm2]
+
+# ---------------------------------------------------------------------------
+# 2. Parsear y normalizar en svc_disc_rhel_pm2_services
+# ---------------------------------------------------------------------------
+- name: Svc_disc_rhel | pm2 | Construir svc_disc_rhel_pm2_services
+  ansible.builtin.set_fact:
+    svc_disc_rhel_pm2_services: >-
+      {%- set ns = namespace(svcs=[]) -%}
+      {%- set known = svc_disc_rhel_parsed_services | default([])
+                      | map(attribute='MainPID', default='0')
+                      | map('trim') | list -%}
+      {%- for result in svc_disc_rhel_pm2_jlist_raw.results | default([]) -%}
+        {%- set user = result.svc_disc_rhel_pm2_user_item | default('unknown') -%}
+        {%- set apps = (result.stdout | default('[]') | trim | from_json)
+                       if (result.stdout | default('') | trim | length > 2) else [] -%}
+        {%- for app in apps -%}
+          {%- set pid = app.pid | default(0) | string -%}
+          {%- if pid != '0' and pid not in known -%}
+
+            {%- set app_name = app.name | default('pm2-app-' ~ pid) -%}
+            {%- set env = app.pm2_env | default({}) -%}
+            {%- set monit = app.monit | default({}) -%}
+
+            {%- set script = env.get('pm_exec_path', env.get('script', none)) -%}
+            {%- set version = env.get('version', none) -%}
+            {%- set uptime_ms = env.get('pm_uptime', 0) -%}
+            {%- set now_ms = ansible_date_time.epoch | default('0') | int * 1000 -%}
+            {%- set uptime_s = ((now_ms - uptime_ms|int) / 1000)|int
+                                if uptime_ms|int > 0 else none -%}
+
+            {%- set cpu_val = monit.get('cpu', none) -%}
+            {%- set mem_b = monit.get('memory', 0) -%}
+            {%- set mem_mb = (mem_b|float / 1048576)|round(2) if mem_b|int > 0 else none -%}
+
+            {%- set status_raw = env.get('status', 'unknown') -%}
+            {%- set svc_status = 'RUNNING' if status_raw == 'online' else 'STOPPED' -%}
+            {%- set severity = svc_disc_rhel_severity_running
+                                 if svc_status == 'RUNNING'
+                                 else svc_disc_rhel_severity_stopped -%}
+
+            {%- set pid_ports = (svc_disc_rhel_pid_ports | default({}))[pid] | default([]) -%}
+            {%- set protocol = pid_ports[0].get('protocol',none) if pid_ports|length > 0 else none -%}
+            {%- set ports_json = pid_ports|to_json if pid_ports|length > 0 else none -%}
+
+            {%- set interpreter = env.get('exec_interpreter', '') -%}
+            {%- set tech_name = 'NODE_JS' -%}
+            {%- if 'python' in interpreter|lower -%}{%- set tech_name = 'PYTHON' -%}
+            {%- elif 'ruby' in interpreter|lower -%}{%- set tech_name = 'RUBY' -%}
+            {%- elif 'ts-node' in interpreter|lower or '.ts' in (script|default('')) -%}
+              {%- set tech_name = 'NODE_TS' -%}
+            {%- endif -%}
+
+            {%- set _ = ns.svcs.append({
+              'service_name': ('pm2-' ~ app_name) | truncate(200, true, ''),
+              'service_type': 'APP_SERVER',
+              'technology': tech_name,
+              'pid': pid,
+              'running_user': user,
+              'binary_path': script,
+              'version_detected': version,
+              'uptime_seconds': uptime_s,
+              'cpu_usage_percent': cpu_val,
+              'memory_usage_mb': mem_mb,
+              'protocol': protocol,
+              'listening_ports': ports_json,
+              'service_status': svc_status,
+              'severity': severity,
+              'last_state_change_timestamp': none
+            }) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.svcs }}
+    cacheable: false
+  tags: [discovery, pm2]
+
+- name: Svc_disc_rhel | pm2 | Resumen PM2 en {{ inventory_hostname }}
+  ansible.builtin.debug:
+    msg: >-
+      svc_disc_rhel — Detectadas {{ svc_disc_rhel_pm2_services | default([]) | length }}
+      app(s) PM2 en {{ inventory_hostname }}.
+  tags: [discovery, pm2]

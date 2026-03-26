@@ -1,0 +1,154 @@
+---
+# =============================================================================
+# roles/svc_disc_win/tasks/java_detection.yml
+# Detecta procesos JVM en Windows que NO estén cubiertos por un servicio
+# Win32_Service ya conocido.
+#
+# Produce: svc_disc_win_java_services — misma estructura canónica
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Obtener procesos java.exe con su cmdline + stats
+# ---------------------------------------------------------------------------
+- name: Svc_disc_win | java | Listar procesos JVM via WMI
+  block:
+    - name: Svc_disc_win | java | Get-WmiObject Win32_Process java
+      ansible.windows.win_shell:
+        _raw_params: |
+          $knownPids = @(
+            Get-WmiObject Win32_Service -ErrorAction SilentlyContinue |
+              Where-Object { $_.State -eq 'Running' } |
+              Select-Object -ExpandProperty ProcessId
+          )
+          $r = @()
+          Get-WmiObject Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^java' -and $_.ProcessId -notin $knownPids } |
+            ForEach-Object {
+              $proc = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+              $cpu   = $null; $memMB = $null; $uptime = $null
+              if ($proc) {
+                $cpu   = [math]::Round($proc.CPU, 2)
+                $memMB = [math]::Round($proc.WorkingSet64 / 1MB, 2)
+                try { $uptime = [int]((Get-Date) - $proc.StartTime).TotalSeconds } catch {}
+              }
+              $version = $null
+              $exePath = ($_.ExecutablePath -replace '"','')
+              if ($exePath -and (Test-Path $exePath -ErrorAction SilentlyContinue)) {
+                try { $version = (Get-Item $exePath).VersionInfo.ProductVersion } catch {}
+              }
+              $r += [PSCustomObject]@{
+                PID         = $_.ProcessId
+                User        = $_.GetOwner().User
+                CommandLine = $_.CommandLine
+                ExePath     = $exePath
+                CPUUsage    = $cpu
+                MemoryMB    = $memMB
+                Uptime      = $uptime
+                Version     = $version
+              }
+            }
+          if ($r.Count -gt 0) { $r | ConvertTo-Json -Depth 3 -Compress }
+          else { Write-Output "[]" }
+      register: svc_disc_win_java_raw
+      changed_when: false
+      timeout: "{{ svc_disc_win_discovery_timeout }}"
+      tags: [discovery, java]
+
+  rescue:
+    - name: Svc_disc_win | java | ERROR en detección Java
+      ansible.builtin.debug:
+        msg: "[ERROR] svc_disc_win — Java detect: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, java]
+
+  always:
+    - name: Svc_disc_win | java | Garantizar svc_disc_win_java_raw
+      ansible.builtin.set_fact:
+        svc_disc_win_java_raw: "{{ svc_disc_win_java_raw | default({'stdout': '[]'}) }}"
+        cacheable: false
+      tags: [discovery, java]
+
+# ---------------------------------------------------------------------------
+# 2. Parsear y normalizar en svc_disc_win_java_services
+# ---------------------------------------------------------------------------
+- name: Svc_disc_win | java | Parsear svc_disc_win_java_proc_list
+  ansible.builtin.set_fact:
+    svc_disc_win_java_proc_list: >-
+      {{ (svc_disc_win_java_raw.stdout | default('[]') | trim | from_json)
+         if (svc_disc_win_java_raw.stdout | default('') | trim | length > 2) else [] }}
+    cacheable: false
+  tags: [discovery, java]
+
+- name: Svc_disc_win | java | Construir svc_disc_win_java_services
+  ansible.builtin.set_fact:
+    svc_disc_win_java_services: >-
+      {%- set ns = namespace(svcs=[]) -%}
+      {%- for proc in svc_disc_win_java_proc_list | default([]) -%}
+
+        {%- set cmdline = proc.CommandLine | default('') -%}
+        {%- set pid     = proc.PID | string -%}
+
+        {# ── Nombre de servicio desde cmdline ── #}
+        {%- set svc_name = 'java-' ~ pid -%}
+        {%- if '-jar ' in cmdline -%}
+          {%- set jar_part = cmdline.split('-jar ')[1].split()[0] -%}
+          {%- set jar_base = jar_part.split('\\')[-1].split('/')[-1]
+                             | regex_replace('\\.jar.*$', '') -%}
+          {%- set svc_name = jar_base | regex_replace('-[0-9].*$', '') -%}
+        {%- elif ' org.' in cmdline or ' com.' in cmdline or ' io.' in cmdline -%}
+          {%- set main_class = cmdline.split()[-1] -%}
+          {%- set svc_name   = main_class.split('.')[-1] -%}
+        {%- elif 'catalina' in cmdline | lower -%}
+          {%- set svc_name = 'tomcat-direct' -%}
+        {%- endif -%}
+
+        {# ── Clasificación tecnológica ── #}
+        {%- set matched = [] -%}
+        {%- for entry in svc_disc_win_java_technology_map -%}
+          {%- if entry.keyword | lower in cmdline | lower and matched | length == 0 -%}
+            {%- set _ = matched.append(entry) -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {%- if matched | length == 0 -%}
+          {%- for entry in svc_disc_win_technology_map -%}
+            {%- if entry.keyword | lower in svc_name | lower and matched | length == 0 -%}
+              {%- set _ = matched.append(entry) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+        {%- set tech = matched[0] if matched | length > 0
+                       else {'service_type': svc_disc_win_java_default_service_type,
+                             'technology': svc_disc_win_java_default_technology} -%}
+
+        {%- set pid_ports  = (svc_disc_win_pid_ports | default({}))[pid] | default([]) -%}
+        {%- set protocol   = pid_ports[0].get('protocol', none) if pid_ports | length > 0 else none -%}
+        {%- set ports_json = pid_ports | to_json if pid_ports | length > 0 else none -%}
+
+        {%- set _ = ns.svcs.append({
+          'service_name': svc_name | truncate(200, true, ''),
+          'service_type': tech.service_type,
+          'technology': tech.technology,
+          'pid': pid,
+          'running_user': proc.User | default(none),
+          'binary_path': proc.ExePath | default(none),
+          'version_detected': proc.Version | default(none),
+          'uptime_seconds': proc.Uptime | default(none),
+          'cpu_usage_percent': proc.CPUUsage | default(none),
+          'memory_usage_mb': proc.MemoryMB | default(none),
+          'protocol': protocol,
+          'listening_ports': ports_json,
+          'service_status': 'RUNNING',
+          'severity': svc_disc_win_severity_running,
+          'last_state_change_timestamp': none
+        }) -%}
+
+      {%- endfor -%}
+      {{ ns.svcs }}
+    cacheable: false
+  tags: [discovery, java]
+
+- name: Svc_disc_win | java | Resumen JVM en {{ inventory_hostname }}
+  ansible.builtin.debug:
+    msg: >-
+      svc_disc_win — Detectados {{ svc_disc_win_java_services | default([]) | length }}
+      proceso(s) JVM adicional(es) en {{ inventory_hostname }}.
+  tags: [discovery, java]

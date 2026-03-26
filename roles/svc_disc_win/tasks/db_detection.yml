@@ -1,0 +1,151 @@
+---
+# =============================================================================
+# roles/svc_disc_win/tasks/db_detection.yml
+# Detección profunda de motores de base de datos en Windows:
+#   - Oracle Database (oracle.exe)
+#   - PostgreSQL (postgres.exe, pg_ctl.exe)
+#   - MySQL (mysqld.exe)
+#   - MongoDB (mongod.exe, mongos.exe)
+#   - SQL Server (sqlservr.exe) — incluido en Win32_Service pero también
+#     cubre instancias no registradas como servicio
+#
+# Variables producidas:
+#   svc_disc_win_db_services — lista en formato canónico
+# =============================================================================
+
+- name: Svc_disc_win | db | Detectar procesos DB en Windows
+  block:
+    - name: Svc_disc_win | db | Get-WmiObject Win32_Process — motores DB
+      ansible.windows.win_shell:
+        _raw_params: |
+          $knownPids = @(
+            Get-WmiObject Win32_Service -ErrorAction SilentlyContinue |
+              Where-Object { $_.State -eq 'Running' } |
+              Select-Object -ExpandProperty ProcessId
+          )
+          $patterns = @('oracle', 'postgres', 'pg_ctl', 'mysqld',
+                        'mongod', 'mongos', 'sqlservr')
+          $r = @()
+          Get-WmiObject Win32_Process -ErrorAction SilentlyContinue | ForEach-Object {
+            $name = $_.Name.ToLower()
+            $match = $false
+            foreach ($p in $patterns) {
+              if ($name -like "*$p*") { $match = $true; break }
+            }
+            if ($match -and $_.ProcessId -notin $knownPids -and $_.ProcessId -gt 0) {
+              $proc = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+              $cpu = $null; $memMB = $null; $uptime = $null
+              if ($proc) {
+                $cpu   = [math]::Round($proc.CPU, 2)
+                $memMB = [math]::Round($proc.WorkingSet64 / 1MB, 2)
+                try { $uptime = [int]((Get-Date) - $proc.StartTime).TotalSeconds } catch {}
+              }
+              $version = $null
+              $exePath = ($_.ExecutablePath -replace '"','')
+              if ($exePath -and (Test-Path $exePath -ErrorAction SilentlyContinue)) {
+                try { $version = (Get-Item $exePath).VersionInfo.ProductVersion } catch {}
+              }
+              $owner = $null
+              try { $owner = $_.GetOwner().User } catch {}
+              $r += [PSCustomObject]@{
+                PID         = $_.ProcessId
+                ProcessName = $_.Name
+                CommandLine = $_.CommandLine
+                ExePath     = $exePath
+                User        = $owner
+                CPUUsage    = $cpu
+                MemoryMB    = $memMB
+                Uptime      = $uptime
+                Version     = $version
+              }
+            }
+          }
+          if ($r.Count -gt 0) { $r | ConvertTo-Json -Depth 3 -Compress }
+          else { Write-Output "[]" }
+      register: svc_disc_win_db_raw
+      changed_when: false
+      timeout: "{{ svc_disc_win_discovery_timeout }}"
+      tags: [discovery, database]
+
+  rescue:
+    - name: Svc_disc_win | db | ERROR en detección DB
+      ansible.builtin.debug:
+        msg: "[ERROR] svc_disc_win — DB detect: {{ ansible_failed_result.msg | default('desconocido') }}"
+      tags: [discovery, database]
+
+  always:
+    - name: Svc_disc_win | db | Garantizar svc_disc_win_db_raw
+      ansible.builtin.set_fact:
+        svc_disc_win_db_raw: "{{ svc_disc_win_db_raw | default({'stdout': '[]'}) }}"
+        cacheable: false
+      tags: [discovery, database]
+
+- name: Svc_disc_win | db | Construir svc_disc_win_db_services
+  ansible.builtin.set_fact:
+    svc_disc_win_db_services: >-
+      {%- set ns = namespace(svcs=[]) -%}
+      {%- set raw = (svc_disc_win_db_raw.stdout | default('[]') | trim | from_json)
+                    if (svc_disc_win_db_raw.stdout | default('') | trim | length > 2) else [] -%}
+      {%- for proc in raw -%}
+
+        {%- set pid     = proc.PID | string -%}
+        {%- set pname   = proc.ProcessName | default('') | lower -%}
+        {%- set cmdline = proc.CommandLine | default('') -%}
+
+        {%- set svc_name = 'db-process-' ~ pid -%}
+        {%- set svc_type = 'DATABASE' -%}
+        {%- set tech     = 'UNKNOWN' -%}
+
+        {%- if 'oracle' in pname -%}
+          {%- set svc_name = 'oracle-db' -%}
+          {%- set tech     = 'ORACLE' -%}
+        {%- elif 'postgres' in pname or 'pg_ctl' in pname -%}
+          {%- set svc_name = 'postgresql' -%}
+          {%- set tech     = 'POSTGRESQL' -%}
+        {%- elif 'mysqld' in pname -%}
+          {%- set svc_name = 'mysql' -%}
+          {%- set tech     = 'MYSQL' -%}
+        {%- elif 'mongos' in pname -%}
+          {%- set svc_name = 'mongodb-router' -%}
+          {%- set tech     = 'MONGODB' -%}
+        {%- elif 'mongod' in pname -%}
+          {%- set svc_name = 'mongodb' -%}
+          {%- set tech     = 'MONGODB' -%}
+        {%- elif 'sqlservr' in pname -%}
+          {%- set svc_name = 'mssql-server' -%}
+          {%- set tech     = 'MSSQLSERVER' -%}
+        {%- endif -%}
+
+        {%- set pid_ports  = (svc_disc_win_pid_ports | default({}))[pid] | default([]) -%}
+        {%- set protocol   = pid_ports[0].get('protocol', none) if pid_ports | length > 0 else none -%}
+        {%- set ports_json = pid_ports | to_json if pid_ports | length > 0 else none -%}
+
+        {%- set _ = ns.svcs.append({
+          'service_name': svc_name | truncate(200, true, ''),
+          'service_type': svc_type,
+          'technology': tech,
+          'pid': pid,
+          'running_user': proc.User | default(none),
+          'binary_path': proc.ExePath | default(none),
+          'version_detected': proc.Version | default(none),
+          'uptime_seconds': proc.Uptime | default(none),
+          'cpu_usage_percent': proc.CPUUsage | default(none),
+          'memory_usage_mb': proc.MemoryMB | default(none),
+          'protocol': protocol,
+          'listening_ports': ports_json,
+          'service_status': 'RUNNING',
+          'severity': svc_disc_win_severity_running,
+          'last_state_change_timestamp': none
+        }) -%}
+
+      {%- endfor -%}
+      {{ ns.svcs }}
+    cacheable: false
+  tags: [discovery, database]
+
+- name: Svc_disc_win | db | Resumen DB en {{ inventory_hostname }}
+  ansible.builtin.debug:
+    msg: >-
+      svc_disc_win — Detectados {{ svc_disc_win_db_services | default([]) | length }}
+      proceso(s) DB adicional(es) en {{ inventory_hostname }}.
+  tags: [discovery, database]

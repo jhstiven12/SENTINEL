@@ -1,0 +1,509 @@
+---
+# =============================================================================
+# playbook_test_oracle.yml — Validación end-to-end de inserción Oracle
+#
+# Propósito:
+#   Verifica que los 5 tipos de operaciones DML/SELECT de SENTINEL funcionan
+#   correctamente contra una base de datos Oracle real, usando el mismo módulo
+#   y conexión que los roles de producción.
+#
+# Ejecución:
+#   ansible-navigator run playbook_test_oracle.yml \
+#     --inventory inventory.ini \
+#     --execution-environment-image sentinel-ee:2.6 \
+#     --mode stdout \
+#     -e "test_oracle_host=myhost test_oracle_port=1521 \
+#         test_oracle_service=ORCLPDB test_oracle_user=CONFIGURACION \
+#         test_oracle_password=mysecret test_oracle_db_node=mydbnode \
+#         test_oracle_schema=CONFIGURACION"
+#
+# Limpieza automática: Sí — el play elimina los datos de prueba al final.
+# =============================================================================
+
+- name: SENTINEL | Validación Oracle — Inserción y Verificación
+  hosts: localhost
+  gather_facts: false
+  vars:
+    test_batch_id: "SENTINEL-TEST-{{ lookup('community.general.random_string', length=8, special=false, upper=true) }}"
+    test_server_id: "00000000-TEST-0000-0000-000000000001"
+    test_hostname: "sentinel-test-host.example.local"
+    test_ip: "10.99.99.99"
+    test_os: "RHEL 9 (Test)"
+    test_environment: "DEVELOPMENT"
+    test_service_name: "sentinel-test-service"
+    test_service_type: "SYSTEM"
+    test_technology: "SENTINEL_TEST"
+
+  tasks:
+
+    # =========================================================================
+    # 0. Prerrequisitos
+    # =========================================================================
+    - name: Test | Validar que las variables de conexión están definidas
+      ansible.builtin.assert:
+        that:
+          - test_oracle_host is defined and test_oracle_host != ''
+          - test_oracle_port is defined
+          - test_oracle_service is defined and test_oracle_service != ''
+          - test_oracle_user is defined and test_oracle_user != ''
+          - test_oracle_password is defined and test_oracle_password != ''
+          - test_oracle_db_node is defined and test_oracle_db_node != ''
+          - test_oracle_schema is defined and test_oracle_schema != ''
+        fail_msg: >-
+          Faltan variables de conexión. Pase todas las variables test_oracle_*
+          via extra_vars (-e).
+
+    - name: Test | Mostrar BATCH_ID de prueba
+      ansible.builtin.debug:
+        msg: "Usando BATCH_ID de prueba: {{ test_batch_id }}"
+
+    # =========================================================================
+    # 1. Verificar conectividad Oracle
+    # =========================================================================
+    - name: Test [1/7] | SELECT 1 FROM dual — conectividad básica
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: "SELECT 1 AS test_val FROM dual"
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+      register: test_dual
+
+    - name: Test [1/7] | Verificar resultado SELECT dual
+      ansible.builtin.assert:
+        that:
+          - test_dual.results is defined
+          - test_dual.results | length == 1
+          - test_dual.results[0].TEST_VAL | int == 1
+        fail_msg: "FALLO [1/7]: SELECT dual no devolvió resultado esperado. Resultado: {{ test_dual }}"
+        success_msg: "OK [1/7]: Conectividad Oracle verificada."
+
+    # =========================================================================
+    # 2. INSERT OBS_BATCH_EXECUTION
+    # =========================================================================
+    - name: Test [2/7] | INSERT OBS_BATCH_EXECUTION
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          INSERT INTO {{ test_oracle_schema }}.OBS_BATCH_EXECUTION
+            (BATCH_ID, BATCH_EXECUTION_TIMESTAMP, EXECUTION_TYPE, TOTAL_SERVERS)
+          VALUES ('{{ test_batch_id }}', SYSTIMESTAMP, 'MANUAL', 0)
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+      register: test_insert_batch
+
+    - name: Test [2/7] | Verificar INSERT OBS_BATCH_EXECUTION
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          SELECT COUNT(*) AS cnt FROM {{ test_oracle_schema }}.OBS_BATCH_EXECUTION
+          WHERE BATCH_ID = '{{ test_batch_id }}'
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+      register: test_verify_batch
+
+    - name: Test [2/7] | Assert OBS_BATCH_EXECUTION
+      ansible.builtin.assert:
+        that:
+          - test_verify_batch.results[0].CNT | int == 1
+        fail_msg: "FALLO [2/7]: OBS_BATCH_EXECUTION no tiene el registro insertado. {{ test_verify_batch }}"
+        success_msg: "OK [2/7]: INSERT OBS_BATCH_EXECUTION verificado."
+
+    # =========================================================================
+    # 3. MERGE OBS_SERVER
+    # =========================================================================
+    - name: Test [3/7] | MERGE OBS_SERVER
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          MERGE INTO {{ test_oracle_schema }}.OBS_SERVER tgt
+          USING (SELECT '{{ test_hostname }}' AS hostname FROM dual) src
+          ON (tgt.HOSTNAME = src.hostname)
+          WHEN MATCHED THEN
+            UPDATE SET tgt.IP_ADDRESS       = '{{ test_ip }}',
+                       tgt.OPERATING_SYSTEM = '{{ test_os }}',
+                       tgt.ENVIRONMENT      = '{{ test_environment }}'
+          WHEN NOT MATCHED THEN
+            INSERT (SERVER_ID, HOSTNAME, IP_ADDRESS, OPERATING_SYSTEM, ENVIRONMENT)
+            VALUES ('{{ test_server_id }}', '{{ test_hostname }}',
+                    '{{ test_ip }}', '{{ test_os }}', '{{ test_environment }}')
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+      register: test_merge_server
+
+    - name: Test [3/7] | Verificar MERGE OBS_SERVER
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          SELECT HOSTNAME, IP_ADDRESS, OPERATING_SYSTEM, ENVIRONMENT
+          FROM {{ test_oracle_schema }}.OBS_SERVER
+          WHERE SERVER_ID = '{{ test_server_id }}'
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+      register: test_verify_server
+
+    - name: Test [3/7] | Assert OBS_SERVER
+      ansible.builtin.assert:
+        that:
+          - test_verify_server.results | length == 1
+          - test_verify_server.results[0].HOSTNAME == test_hostname
+          - test_verify_server.results[0].IP_ADDRESS == test_ip
+          - test_verify_server.results[0].ENVIRONMENT == test_environment
+        fail_msg: "FALLO [3/7]: MERGE OBS_SERVER fallido. {{ test_verify_server }}"
+        success_msg: "OK [3/7]: MERGE OBS_SERVER verificado."
+
+    # =========================================================================
+    # 4. MERGE OBS_SERVICE
+    # =========================================================================
+    - name: Test [4/7] | MERGE OBS_SERVICE
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          MERGE INTO {{ test_oracle_schema }}.OBS_SERVICE tgt
+          USING (SELECT '{{ test_server_id }}' AS server_id,
+                        '{{ test_service_name }}' AS service_name
+                 FROM dual) src
+          ON (tgt.SERVER_ID = src.server_id AND tgt.SERVICE_NAME = src.service_name)
+          WHEN MATCHED THEN
+            UPDATE SET tgt.SERVICE_TYPE = '{{ test_service_type }}',
+                       tgt.TECHNOLOGY   = '{{ test_technology }}'
+          WHEN NOT MATCHED THEN
+            INSERT (SERVICE_ID, SERVER_ID, SERVICE_NAME, SERVICE_TYPE, TECHNOLOGY)
+            VALUES ({{ test_oracle_schema }}.OBS_SERVICE_SEQ.NEXTVAL,
+                    '{{ test_server_id }}', '{{ test_service_name }}',
+                    '{{ test_service_type }}', '{{ test_technology }}')
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+      register: test_merge_service
+
+    # =========================================================================
+    # 5. SELECT SERVICE_ID (idéntico al flujo de oracle_persist.yml)
+    # =========================================================================
+    - name: Test [5/7] | SELECT SERVICE_ID
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          SELECT SERVICE_ID FROM {{ test_oracle_schema }}.OBS_SERVICE
+          WHERE SERVER_ID = '{{ test_server_id }}'
+          AND SERVICE_NAME = '{{ test_service_name }}'
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+      register: test_svc_id_result
+
+    - name: Test [5/7] | Guardar SERVICE_ID y verificar
+      ansible.builtin.set_fact:
+        test_current_service_id: "{{ test_svc_id_result.results[0].SERVICE_ID | default(none) }}"
+
+    - name: Test [5/7] | Assert SERVICE_ID válido
+      ansible.builtin.assert:
+        that:
+          - test_svc_id_result.results | length == 1
+          - test_current_service_id is not none
+          - test_current_service_id | int > 0
+        fail_msg: "FALLO [5/7]: SELECT SERVICE_ID no devolvió valor. {{ test_svc_id_result }}"
+        success_msg: "OK [5/7]: SERVICE_ID obtenido: {{ test_current_service_id }}"
+
+    # =========================================================================
+    # 6. INSERT OBS_SERVICE_LOG (con campos nullable — caso completo)
+    # =========================================================================
+    - name: Test [6/7] | Construir SQL INSERT OBS_SERVICE_LOG (campos nullables)
+      ansible.builtin.set_fact:
+        test_log_sql: >-
+          INSERT INTO {{ test_oracle_schema }}.OBS_SERVICE_LOG
+          (LOG_ID, BATCH_ID, SERVER_ID, SERVICE_ID, COLLECTION_TIMESTAMP,
+           PID, RUNNING_USER, BINARY_PATH, VERSION_DETECTED,
+           UPTIME_SECONDS, CPU_USAGE_PERCENT, MEMORY_USAGE_MB,
+           PROTOCOL, SERVICE_STATUS, SEVERITY,
+           LAST_STATE_CHANGE_TIMESTAMP, LISTENING_PORTS)
+          VALUES
+          ({{ test_oracle_schema }}.OBS_SERVICE_LOG_SEQ.NEXTVAL,
+           '{{ test_batch_id }}',
+           '{{ test_server_id }}',
+           {{ test_current_service_id }},
+           SYSTIMESTAMP,
+           1234,
+           'test-user',
+           '/usr/bin/sentinel-test',
+           '1.0.0-test',
+           3600,
+           0.5,
+           128.5,
+           'TCP',
+           'running',
+           'INFO',
+           NULL,
+           '8080,8443')
+
+    - name: Test [6/7] | INSERT OBS_SERVICE_LOG
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: "{{ test_log_sql }}"
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+      register: test_insert_log
+
+    - name: Test [6/7] | Verificar INSERT OBS_SERVICE_LOG
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          SELECT PID, RUNNING_USER, SERVICE_STATUS, SEVERITY, LISTENING_PORTS
+          FROM {{ test_oracle_schema }}.OBS_SERVICE_LOG
+          WHERE BATCH_ID = '{{ test_batch_id }}'
+          AND SERVER_ID = '{{ test_server_id }}'
+          AND SERVICE_ID = {{ test_current_service_id }}
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+      register: test_verify_log
+
+    - name: Test [6/7] | Assert OBS_SERVICE_LOG
+      ansible.builtin.assert:
+        that:
+          - test_verify_log.results | length == 1
+          - test_verify_log.results[0].PID | int == 1234
+          - test_verify_log.results[0].RUNNING_USER == 'test-user'
+          - test_verify_log.results[0].SERVICE_STATUS == 'running'
+          - test_verify_log.results[0].SEVERITY == 'INFO'
+        fail_msg: "FALLO [6/7]: INSERT OBS_SERVICE_LOG fallido. {{ test_verify_log }}"
+        success_msg: "OK [6/7]: INSERT OBS_SERVICE_LOG con campos nullable verificado."
+
+    # =========================================================================
+    # 7. UPDATE OBS_BATCH_EXECUTION (TOTAL_SERVERS) — batch_finalize
+    # =========================================================================
+    - name: Test [7/7] | UPDATE OBS_BATCH_EXECUTION TOTAL_SERVERS
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          UPDATE {{ test_oracle_schema }}.OBS_BATCH_EXECUTION
+          SET TOTAL_SERVERS = 5
+          WHERE BATCH_ID = '{{ test_batch_id }}'
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+
+    - name: Test [7/7] | Verificar UPDATE TOTAL_SERVERS
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          SELECT TOTAL_SERVERS FROM {{ test_oracle_schema }}.OBS_BATCH_EXECUTION
+          WHERE BATCH_ID = '{{ test_batch_id }}'
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+      register: test_verify_update
+
+    - name: Test [7/7] | Assert UPDATE TOTAL_SERVERS
+      ansible.builtin.assert:
+        that:
+          - test_verify_update.results[0].TOTAL_SERVERS | int == 5
+        fail_msg: "FALLO [7/7]: UPDATE TOTAL_SERVERS fallido. {{ test_verify_update }}"
+        success_msg: "OK [7/7]: UPDATE OBS_BATCH_EXECUTION TOTAL_SERVERS verificado."
+
+    # =========================================================================
+    # Resumen
+    # =========================================================================
+    - name: SENTINEL | Todos los tests pasaron correctamente
+      ansible.builtin.debug:
+        msg: >-
+          [OK] Validación Oracle completa. Todas las operaciones DML/SELECT
+          de SENTINEL funcionan correctamente con opitzconsulting.ansible_oracle.oracle_sql.
+          BATCH_ID de prueba: {{ test_batch_id }}.
+
+    # =========================================================================
+    # Limpieza — siempre ejecutar (always) para no contaminar datos
+    # =========================================================================
+    - name: Limpieza | DELETE OBS_SERVICE_LOG (test)
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          DELETE FROM {{ test_oracle_schema }}.OBS_SERVICE_LOG
+          WHERE BATCH_ID = '{{ test_batch_id }}'
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+      when: test_batch_id is defined
+      tags: [always]
+
+    - name: Limpieza | DELETE OBS_SERVICE (test)
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          DELETE FROM {{ test_oracle_schema }}.OBS_SERVICE
+          WHERE SERVER_ID = '{{ test_server_id }}'
+          AND SERVICE_NAME = '{{ test_service_name }}'
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+      when: test_server_id is defined
+      tags: [always]
+
+    - name: Limpieza | DELETE OBS_SERVER (test)
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          DELETE FROM {{ test_oracle_schema }}.OBS_SERVER
+          WHERE SERVER_ID = '{{ test_server_id }}'
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+      when: test_server_id is defined
+      tags: [always]
+
+    - name: Limpieza | DELETE OBS_BATCH_EXECUTION (test)
+      opitzconsulting.ansible_oracle.oracle_sql:
+        hostname: "{{ test_oracle_host }}"
+        port: "{{ test_oracle_port }}"
+        service_name: "{{ test_oracle_service }}"
+        username: "{{ test_oracle_user }}"
+        password: "{{ test_oracle_password }}"
+        mode: "sysdba"
+        sql: >-
+          DELETE FROM {{ test_oracle_schema }}.OBS_BATCH_EXECUTION
+          WHERE BATCH_ID = '{{ test_batch_id }}'
+      environment:
+        ORACLE_HOME: /opt/oracle/instantclient
+        LD_LIBRARY_PATH: /opt/oracle/instantclient
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      no_log: false
+      delegate_to: "{{ test_oracle_db_node }}"
+      when: test_batch_id is defined
+      tags: [always]
+
+    - name: Limpieza | Confirmación
+      ansible.builtin.debug:
+        msg: "Limpieza completada — datos de prueba eliminados."
+      tags: [always]

@@ -1,0 +1,8 @@
+---
+galaxy_info:
+  role_name: svc_disc_win
+  author: sentinel
+  description: Descubrimiento de servicios Windows y procesos Java en Windows Server 2016/2019/2022 con persistencia Oracle
+  license: "MIT"
+  min_ansible_version: "2.15"
+dependencies: []

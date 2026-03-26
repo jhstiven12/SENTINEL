@@ -1,0 +1,162 @@
+---
+# =============================================================================
+# roles/svc_disc_rhel/defaults/main.yml
+# TODAS las variables llevan prefijo svc_disc_rhel_
+# Las variables de conexión y ejecución provienen de vars/main.yml
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Oracle — conectividad (host/port/service derivados de oracle_dsn en vars/)
+# ---------------------------------------------------------------------------
+svc_disc_rhel_oracle_schema: "CONFIGURACION"
+svc_disc_rhel_oracle_host: "{{ svc_disc_rhel_oracle_dsn.split(':')[0] }}"
+svc_disc_rhel_oracle_port: "{{ svc_disc_rhel_oracle_dsn.split(':')[1].split('/')[0] }}"
+svc_disc_rhel_oracle_service: "{{ svc_disc_rhel_oracle_dsn.split('/')[1] }}"
+
+# ---------------------------------------------------------------------------
+# Parámetros de descubrimiento
+# ---------------------------------------------------------------------------
+svc_disc_rhel_discovery_timeout: 120
+
+svc_disc_rhel_excluded_services:
+  - "kdump.service"
+  - "serial-getty@.service"
+
+# ---------------------------------------------------------------------------
+# Severidad
+# ---------------------------------------------------------------------------
+svc_disc_rhel_severity_running: "INFO"
+svc_disc_rhel_severity_stopped: "WARNING"
+
+# ---------------------------------------------------------------------------
+# Clasificación tecnológica — incluye detección Java
+# ---------------------------------------------------------------------------
+svc_disc_rhel_technology_map:
+  # Bases de datos
+  - {keyword: "oracle", service_type: "DATABASE", technology: "ORACLE"}
+  - {keyword: "mysql", service_type: "DATABASE", technology: "MYSQL"}
+  - {keyword: "mariadb", service_type: "DATABASE", technology: "MARIADB"}
+  - {keyword: "postgresql", service_type: "DATABASE", technology: "POSTGRESQL"}
+  - {keyword: "postgres", service_type: "DATABASE", technology: "POSTGRESQL"}
+  - {keyword: "mongod", service_type: "DATABASE", technology: "MONGODB"}
+  - {keyword: "mongos", service_type: "DATABASE", technology: "MONGODB"}
+  - {keyword: "sqlservr", service_type: "DATABASE", technology: "MSSQLSERVER"}
+  - {keyword: "mssql", service_type: "DATABASE", technology: "MSSQLSERVER"}
+  - {keyword: "tnslsnr", service_type: "DATABASE_LISTENER", technology: "ORACLE"}
+  - {keyword: "ora_pmon", service_type: "DATABASE", technology: "ORACLE"}
+  # PM2 / Node.js
+  - {keyword: "pm2", service_type: "APP_SERVER", technology: "NODE_JS"}
+  - {keyword: "node", service_type: "APP_SERVER", technology: "NODE_JS"}
+  # Cache
+  - {keyword: "redis", service_type: "CACHE", technology: "REDIS"}
+  - {keyword: "memcached", service_type: "CACHE", technology: "MEMCACHED"}
+  # Web / App servers
+  - {keyword: "httpd", service_type: "WEB_SERVER", technology: "APACHE"}
+  - {keyword: "apache", service_type: "WEB_SERVER", technology: "APACHE"}
+  - {keyword: "nginx", service_type: "WEB_SERVER", technology: "NGINX"}
+  - {keyword: "tomcat", service_type: "APP_SERVER", technology: "TOMCAT"}
+  - {keyword: "catalina", service_type: "APP_SERVER", technology: "TOMCAT"}
+  - {keyword: "jboss", service_type: "APP_SERVER", technology: "JBOSS"}
+  - {keyword: "wildfly", service_type: "APP_SERVER", technology: "WILDFLY"}
+  # Reverse Proxies / Load Balancers
+  - {keyword: "haproxy", service_type: "REVERSE_PROXY", technology: "HAPROXY"}
+  - {keyword: "traefik", service_type: "REVERSE_PROXY", technology: "TRAEFIK"}
+  - {keyword: "envoy", service_type: "REVERSE_PROXY", technology: "ENVOY"}
+  - {keyword: "varnish", service_type: "REVERSE_PROXY", technology: "VARNISH"}
+  - {keyword: "squid", service_type: "REVERSE_PROXY", technology: "SQUID"}
+  # Mensajería
+  - {keyword: "activemq", service_type: "MESSAGING", technology: "ACTIVEMQ"}
+  - {keyword: "rabbitmq", service_type: "MESSAGING", technology: "RABBITMQ"}
+  - {keyword: "kafka", service_type: "MESSAGING", technology: "KAFKA"}
+  # Java / Spring
+  - {keyword: "spring", service_type: "APP_SERVER", technology: "SPRING_BOOT"}
+  - {keyword: "quarkus", service_type: "APP_SERVER", technology: "QUARKUS"}
+  - {keyword: "micronaut", service_type: "APP_SERVER", technology: "MICRONAUT"}
+  # Sistema
+  - {keyword: "sshd", service_type: "SYSTEM", technology: "OPENSSH"}
+  - {keyword: "crond", service_type: "SYSTEM", technology: "CROND"}
+  - {keyword: "firewalld", service_type: "SYSTEM", technology: "FIREWALLD"}
+  - {keyword: "chronyd", service_type: "SYSTEM", technology: "CHRONY"}
+  - {keyword: "rsyslog", service_type: "SYSTEM", technology: "RSYSLOG"}
+  # Contenedores
+  - {keyword: "docker", service_type: "CONTAINER", technology: "DOCKER"}
+  - {keyword: "containerd", service_type: "CONTAINER", technology: "CONTAINERD"}
+  - {keyword: "kubelet", service_type: "CONTAINER", technology: "KUBERNETES"}
+  - {keyword: "podman", service_type: "CONTAINER", technology: "PODMAN"}
+  # Agentes de seguridad
+  - {keyword: "splunk", service_type: "SECURITY_AGENT", technology: "SPLUNK_FORWARDER"}
+  - {keyword: "qualys", service_type: "SECURITY_AGENT", technology: "QUALYS"}
+  - {keyword: "falcon", service_type: "SECURITY_AGENT", technology: "CROWDSTRIKE"}
+  - {keyword: "ossec", service_type: "SECURITY_AGENT", technology: "OSSEC"}
+  - {keyword: "wazuh", service_type: "SECURITY_AGENT", technology: "WAZUH"}
+  - {keyword: "clamd", service_type: "SECURITY_AGENT", technology: "CLAMAV"}
+  # Agentes de monitoreo
+  - {keyword: "zabbix", service_type: "MONITORING_AGENT", technology: "ZABBIX"}
+  - {keyword: "node_exporter", service_type: "MONITORING_AGENT", technology: "PROMETHEUS"}
+  - {keyword: "prometheus", service_type: "MONITORING", technology: "PROMETHEUS"}
+  - {keyword: "grafana", service_type: "MONITORING", technology: "GRAFANA"}
+  - {keyword: "telegraf", service_type: "MONITORING_AGENT", technology: "TELEGRAF"}
+  - {keyword: "datadog", service_type: "MONITORING_AGENT", technology: "DATADOG"}
+  - {keyword: "filebeat", service_type: "LOG_SHIPPER", technology: "ELASTIC_BEATS"}
+  - {keyword: "metricbeat", service_type: "MONITORING_AGENT", technology: "ELASTIC_BEATS"}
+  - {keyword: "fluentd", service_type: "LOG_SHIPPER", technology: "FLUENTD"}
+  - {keyword: "fluent-bit", service_type: "LOG_SHIPPER", technology: "FLUENT_BIT"}
+  - {keyword: "nrpe", service_type: "MONITORING_AGENT", technology: "NAGIOS"}
+  - {keyword: "snmpd", service_type: "MONITORING_AGENT", technology: "SNMP"}
+  # DNS / LDAP
+  - {keyword: "named", service_type: "DNS", technology: "BIND"}
+  - {keyword: "dnsmasq", service_type: "DNS", technology: "DNSMASQ"}
+  - {keyword: "unbound", service_type: "DNS", technology: "UNBOUND"}
+  - {keyword: "coredns", service_type: "DNS", technology: "COREDNS"}
+  - {keyword: "slapd", service_type: "LDAP", technology: "OPENLDAP"}
+  - {keyword: "sssd", service_type: "LDAP", technology: "SSSD"}
+  # Correo
+  - {keyword: "postfix", service_type: "MAIL", technology: "POSTFIX"}
+  - {keyword: "dovecot", service_type: "MAIL", technology: "DOVECOT"}
+  - {keyword: "sendmail", service_type: "MAIL", technology: "SENDMAIL"}
+  # Secrets / Service Mesh
+  - {keyword: "vault", service_type: "SECRETS", technology: "VAULT"}
+  - {keyword: "consul", service_type: "SERVICE_MESH", technology: "CONSUL"}
+  # Cluster
+  - {keyword: "etcd", service_type: "CLUSTER", technology: "ETCD"}
+  - {keyword: "zookeeper", service_type: "CLUSTER", technology: "ZOOKEEPER"}
+  # Storage
+  - {keyword: "nfsd", service_type: "STORAGE", technology: "NFS"}
+  - {keyword: "smbd", service_type: "STORAGE", technology: "SAMBA"}
+
+svc_disc_rhel_default_service_type: "SYSTEM"
+svc_disc_rhel_default_technology: "UNKNOWN"
+
+# Clasificación específica para procesos Java sin nombre de servicio claro
+svc_disc_rhel_java_technology_map:
+  - {keyword: "catalina", service_type: "APP_SERVER", technology: "TOMCAT"}
+  - {keyword: "tomcat", service_type: "APP_SERVER", technology: "TOMCAT"}
+  - {keyword: "wildfly", service_type: "APP_SERVER", technology: "WILDFLY"}
+  - {keyword: "jboss", service_type: "APP_SERVER", technology: "JBOSS"}
+  - {keyword: "activemq", service_type: "MESSAGING", technology: "ACTIVEMQ"}
+  - {keyword: "kafka", service_type: "MESSAGING", technology: "KAFKA"}
+  - {keyword: "spring", service_type: "APP_SERVER", technology: "SPRING_BOOT"}
+  - {keyword: "quarkus", service_type: "APP_SERVER", technology: "QUARKUS"}
+  - {keyword: "elasticsearch", service_type: "DATABASE", technology: "ELASTICSEARCH"}
+  - {keyword: "logstash", service_type: "MESSAGING", technology: "LOGSTASH"}
+  - {keyword: "jenkins", service_type: "CI_CD", technology: "JENKINS"}
+  - {keyword: "nexus", service_type: "REPOSITORY", technology: "NEXUS"}
+  - {keyword: "sonar", service_type: "QUALITY", technology: "SONARQUBE"}
+  - {keyword: "keycloak", service_type: "SECURITY", technology: "KEYCLOAK"}
+  - {keyword: "glassfish", service_type: "APP_SERVER", technology: "GLASSFISH"}
+  - {keyword: "payara", service_type: "APP_SERVER", technology: "PAYARA"}
+
+svc_disc_rhel_java_default_service_type: "APP_SERVER"
+svc_disc_rhel_java_default_technology: "JAVA"
+
+# Binarios de DB a buscar como procesos sueltos (fuera de systemd)
+svc_disc_rhel_db_process_patterns:
+  - {pattern: "ora_pmon_", technology: "ORACLE", service_type: "DATABASE"}
+  - {pattern: "tnslsnr", technology: "ORACLE", service_type: "DATABASE_LISTENER"}
+  - {pattern: "postgres", technology: "POSTGRESQL", service_type: "DATABASE"}
+  - {pattern: "postmaster", technology: "POSTGRESQL", service_type: "DATABASE"}
+  - {pattern: "mysqld", technology: "MYSQL", service_type: "DATABASE"}
+  - {pattern: "mariadbd", technology: "MARIADB", service_type: "DATABASE"}
+  - {pattern: "mongod", technology: "MONGODB", service_type: "DATABASE"}
+  - {pattern: "mongos", technology: "MONGODB", service_type: "DATABASE"}
+  - {pattern: "sqlservr", technology: "MSSQLSERVER", service_type: "DATABASE"}

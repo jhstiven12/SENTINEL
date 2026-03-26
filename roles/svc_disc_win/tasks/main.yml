@@ -1,0 +1,60 @@
+---
+# =============================================================================
+# roles/svc_disc_win/tasks/main.yml — Orquestador del rol svc_disc_win
+# =============================================================================
+
+- name: Svc_disc_win | Validación pre-ejecución (conectividad, esquema, secuencias)
+  ansible.builtin.include_tasks: preflight.yml
+  tags: [preflight, always]
+
+- name: Svc_disc_win | Inicializar batch de ejecución
+  ansible.builtin.include_tasks: batch_init.yml
+  tags: [batch, always]
+
+- name: Svc_disc_win | Upsert servidor en OBS_SERVER
+  ansible.builtin.include_tasks: server.yml
+  tags: [servers]
+
+- name: Svc_disc_win | Descubrir puertos en escucha
+  ansible.builtin.include_tasks: ports.yml
+  tags: [discovery]
+
+- name: Svc_disc_win | Descubrir servicios Windows activos
+  ansible.builtin.include_tasks: services.yml
+  tags: [discovery, services]
+
+- name: Svc_disc_win | Descubrir procesos Java (JVM)
+  ansible.builtin.include_tasks: java_detection.yml
+  tags: [discovery, java]
+
+- name: Svc_disc_win | Descubrir aplicaciones PM2
+  ansible.builtin.include_tasks: pm2_detection.yml
+  tags: [discovery, pm2]
+
+- name: Svc_disc_win | Descubrir motores de base de datos (Oracle, PG, MySQL, Mongo, MSSQL)
+  ansible.builtin.include_tasks: db_detection.yml
+  tags: [discovery, database]
+
+- name: Svc_disc_win | Descubrir web servers, reverse proxies, Apache, Tomcat
+  ansible.builtin.include_tasks: webserver_detection.yml
+  tags: [discovery, webserver]
+
+- name: Svc_disc_win | Descubrir contenedores Docker
+  ansible.builtin.include_tasks: docker_detection.yml
+  tags: [discovery, docker]
+
+- name: Svc_disc_win | Descubrir agentes de seguridad, monitoreo, DNS, K8s
+  ansible.builtin.include_tasks: infra_agents_detection.yml
+  tags: [discovery, infra]
+
+- name: Svc_disc_win | Normalizar todos los datos
+  ansible.builtin.include_tasks: normalize.yml
+  tags: [discovery, services, java, pm2, database, webserver, docker, infra]
+
+- name: Svc_disc_win | Persistir servicios en Oracle
+  ansible.builtin.include_tasks: oracle_persist.yml
+  tags: [oracle_insert, services]
+
+- name: Svc_disc_win | Finalizar batch
+  ansible.builtin.include_tasks: batch_finalize.yml
+  tags: [batch, oracle_insert]
