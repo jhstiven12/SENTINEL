@@ -84,14 +84,21 @@
       run_once: true
       tags: [preflight]
 
+    - name: Svc_disc_rhel | Preflight | Extraer conteo de tablas
+      ansible.builtin.set_fact:
+        svc_disc_rhel_table_count: >-
+          {{ svc_disc_rhel_preflight_tables.results[0]
+             | dict2items | map(attribute='value') | list | first | int }}
+      run_once: true
+      tags: [preflight]
+
     - name: Svc_disc_rhel | Preflight | Validar que las 4 tablas existen
       ansible.builtin.assert:
         that:
-          - svc_disc_rhel_preflight_tables.results | default([]) | length > 0
-          - svc_disc_rhel_preflight_tables.results[0].CNT | int == 4
+          - svc_disc_rhel_table_count | int == 4
         fail_msg: >-
           [FATAL] svc_disc_rhel — Faltan tablas en {{ svc_disc_rhel_oracle_schema }}.
-          Encontradas: {{ svc_disc_rhel_preflight_tables.results[0].CNT | default('0') }} de 4.
+          Encontradas: {{ svc_disc_rhel_table_count }} de 4.
           Ejecute ddl_changes.sql antes de continuar.
         success_msg: >-
           Preflight OK — Las 4 tablas del esquema {{ svc_disc_rhel_oracle_schema }} existen.
@@ -130,14 +137,21 @@
       run_once: true
       tags: [preflight]
 
+    - name: Svc_disc_rhel | Preflight | Extraer conteo de secuencias
+      ansible.builtin.set_fact:
+        svc_disc_rhel_seq_count: >-
+          {{ svc_disc_rhel_preflight_seqs.results[0]
+             | dict2items | map(attribute='value') | list | first | int }}
+      run_once: true
+      tags: [preflight]
+
     - name: Svc_disc_rhel | Preflight | Validar que las 2 secuencias existen
       ansible.builtin.assert:
         that:
-          - svc_disc_rhel_preflight_seqs.results | default([]) | length > 0
-          - svc_disc_rhel_preflight_seqs.results[0].CNT | int == 2
+          - svc_disc_rhel_seq_count | int == 2
         fail_msg: >-
           [FATAL] svc_disc_rhel — Faltan secuencias en {{ svc_disc_rhel_oracle_schema }}.
-          Encontradas: {{ svc_disc_rhel_preflight_seqs.results[0].CNT | default('0') }} de 2.
+          Encontradas: {{ svc_disc_rhel_seq_count }} de 2.
           Ejecute ddl_changes.sql antes de continuar.
         success_msg: >-
           Preflight OK — OBS_SERVICE_SEQ y OBS_SERVICE_LOG_SEQ existen.
