@@ -138,15 +138,30 @@
   loop_control:
     label: "{{ item.get('Id', 'unknown') }}"
   ignore_errors: true   # noqa: ignore-errors — best-effort
-  timeout: 10
+  async: 5
+  poll: 0
+  timeout: 5
+  tags: [discovery, services]
+
+- name: Svc_disc_rhel | Services | Esperar resultados de detección de versión
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  register: svc_disc_rhel_ver_jobs
+  until: svc_disc_rhel_ver_jobs.finished
+  retries: 6
+  delay: 1
+  loop: "{{ svc_disc_rhel_ver_raw.results }}"
+  loop_control:
+    label: "{{ item.item.get('Id', 'unknown') }}"
+  ignore_errors: true   # noqa: ignore-errors — best-effort
   tags: [discovery, services]
 
 - name: Svc_disc_rhel | Services | Construir svc_disc_rhel_ver_map
   ansible.builtin.set_fact:
     svc_disc_rhel_ver_map: >-
       {%- set ns = namespace(r={}) -%}
-      {%- for r in svc_disc_rhel_ver_raw.results -%}
-        {%- set sid = r.item.get('Id', '') -%}
+      {%- for r in svc_disc_rhel_ver_jobs.results | default([]) -%}
+        {%- set sid = r.item.item.get('Id', '') -%}
         {%- set ver = r.stdout | default('') | trim -%}
         {%- if sid and ver -%}{%- set _ = ns.r.update({sid: ver[:200]}) -%}{%- endif -%}
       {%- endfor -%}

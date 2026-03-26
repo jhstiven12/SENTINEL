@@ -91,32 +91,26 @@
         {%- for app in apps -%}
           {%- set pid = app.pid | default(0) | string -%}
           {%- if pid != '0' and pid not in known -%}
-
             {%- set app_name = app.name | default('pm2-app-' ~ pid) -%}
             {%- set env = app.pm2_env | default({}) -%}
             {%- set monit = app.monit | default({}) -%}
-
             {%- set script = env.get('pm_exec_path', env.get('script', none)) -%}
             {%- set version = env.get('version', none) -%}
             {%- set uptime_ms = env.get('pm_uptime', 0) -%}
             {%- set now_ms = ansible_date_time.epoch | default('0') | int * 1000 -%}
             {%- set uptime_s = ((now_ms - uptime_ms|int) / 1000)|int
                                 if uptime_ms|int > 0 else none -%}
-
             {%- set cpu_val = monit.get('cpu', none) -%}
             {%- set mem_b = monit.get('memory', 0) -%}
             {%- set mem_mb = (mem_b|float / 1048576)|round(2) if mem_b|int > 0 else none -%}
-
             {%- set status_raw = env.get('status', 'unknown') -%}
             {%- set svc_status = 'RUNNING' if status_raw == 'online' else 'STOPPED' -%}
             {%- set severity = svc_disc_rhel_severity_running
                                  if svc_status == 'RUNNING'
                                  else svc_disc_rhel_severity_stopped -%}
-
             {%- set pid_ports = (svc_disc_rhel_pid_ports | default({}))[pid] | default([]) -%}
             {%- set protocol = pid_ports[0].get('protocol',none) if pid_ports|length > 0 else none -%}
             {%- set ports_json = pid_ports|to_json if pid_ports|length > 0 else none -%}
-
             {%- set interpreter = env.get('exec_interpreter', '') -%}
             {%- set tech_name = 'NODE_JS' -%}
             {%- if 'python' in interpreter|lower -%}{%- set tech_name = 'PYTHON' -%}
@@ -124,7 +118,6 @@
             {%- elif 'ts-node' in interpreter|lower or '.ts' in (script|default('')) -%}
               {%- set tech_name = 'NODE_TS' -%}
             {%- endif -%}
-
             {%- set _ = ns.svcs.append({
               'service_name': ('pm2-' ~ app_name) | truncate(200, true, ''),
               'service_type': 'APP_SERVER',

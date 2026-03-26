@@ -57,6 +57,7 @@
           }'
       register: svc_disc_rhel_ns_tcp
       changed_when: false
+      failed_when: false
       timeout: "{{ svc_disc_rhel_discovery_timeout }}"
       tags: [discovery]
 
@@ -72,6 +73,7 @@
           }'
       register: svc_disc_rhel_ns_udp
       changed_when: false
+      failed_when: false
       timeout: "{{ svc_disc_rhel_discovery_timeout }}"
       tags: [discovery]
 
