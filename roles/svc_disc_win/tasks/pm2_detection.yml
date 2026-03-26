@@ -92,17 +92,14 @@
         {%- set severity   = svc_disc_win_severity_running
                              if svc_status == 'RUNNING'
                              else svc_disc_win_severity_stopped -%}
-
         {%- set pid_ports  = (svc_disc_win_pid_ports | default({}))[pid] | default([]) -%}
         {%- set protocol   = pid_ports[0].get('protocol', none) if pid_ports | length > 0 else none -%}
         {%- set ports_json = pid_ports | to_json if pid_ports | length > 0 else none -%}
-
         {%- set interpreter = app.Interpreter | default('') -%}
         {%- set tech_name   = 'NODE_JS' -%}
         {%- if 'python' in interpreter | lower -%}{%- set tech_name = 'PYTHON' -%}
         {%- elif 'ts-node' in interpreter | lower -%}{%- set tech_name = 'NODE_TS' -%}
         {%- endif -%}
-
         {%- set _ = ns.svcs.append({
           'service_name': ('pm2-' ~ app.AppName | default('app-' ~ pid)) | truncate(200, true, ''),
           'service_type': 'APP_SERVER',
