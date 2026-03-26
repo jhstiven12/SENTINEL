@@ -60,15 +60,24 @@
       register: svc_disc_win_svc_id_result
       delegate_to: "{{ svc_disc_win_oracle_db_node }}"
 
+    - name: Svc_disc_win | oracle | DEBUG resultado SELECT SERVICE_ID
+      ansible.builtin.debug:
+        var: svc_disc_win_svc_id_result
+
     - name: Svc_disc_win | oracle | Guardar svc_disc_win_current_service_id
       ansible.builtin.set_fact:
         cacheable: false
         svc_disc_win_current_service_id: >-
-          {{ (svc_disc_win_svc_id_result.results
-              | dict2items | map(attribute='value') | list | first)
-             if svc_disc_win_svc_id_result.results is mapping
-             else (svc_disc_win_svc_id_result.results
-                   | map(attribute='SERVICE_ID') | list | first | default(none)) }}
+          {%- if 'results' in svc_disc_win_svc_id_result -%}
+            {%- set _rows = svc_disc_win_svc_id_result['results'] -%}
+            {%- if _rows is mapping -%}
+              {{ _rows | dict2items | map(attribute='value') | list | first | default(none) }}
+            {%- else -%}
+              {{ _rows | map(attribute='SERVICE_ID') | list | first | default(none) }}
+            {%- endif -%}
+          {%- else -%}
+            {{ none }}
+          {%- endif -%}
 
     - name: Svc_disc_win | oracle | Construir SQL INSERT OBS_SERVICE_LOG
       ansible.builtin.set_fact:
