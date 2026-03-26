@@ -62,9 +62,13 @@
 
     - name: Svc_disc_rhel | Oracle | Guardar svc_disc_rhel_current_service_id
       ansible.builtin.set_fact:
-        svc_disc_rhel_current_service_id: >-
-          {{ svc_disc_rhel_svc_id_result.results[0].SERVICE_ID | default(none) }}
         cacheable: false
+        svc_disc_rhel_current_service_id: >-
+          {{ (svc_disc_rhel_svc_id_result.results
+              | dict2items | map(attribute='value') | list | first)
+             if svc_disc_rhel_svc_id_result.results is mapping
+             else (svc_disc_rhel_svc_id_result.results
+                   | map(attribute='SERVICE_ID') | list | first | default(none)) }}
 
     - name: Svc_disc_rhel | Oracle | Construir SQL INSERT OBS_SERVICE_LOG
       ansible.builtin.set_fact:
@@ -80,20 +84,20 @@
           ({{ svc_disc_rhel_oracle_schema }}.OBS_SERVICE_LOG_SEQ.NEXTVAL,
            '{{ svc_disc_rhel_batch_id }}',
            '{{ svc_disc_rhel_server_id }}',
-           {{ svc_disc_rhel_current_service_id | default('NULL') }},
+           {{ svc_disc_rhel_current_service_id | default('NULL', true) }},
            SYSTIMESTAMP,
            {{ svc_disc_rhel_svc.pid | default(none) if svc_disc_rhel_svc.pid | default(none) is not none else 'NULL' }},
-           {{ ("'" ~ (svc_disc_rhel_svc.running_user | default('') | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.running_user | default(none) is not none else 'NULL' }},
-           {{ ("'" ~ (svc_disc_rhel_svc.binary_path | default('') | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.binary_path | default(none) is not none else 'NULL' }},
-           {{ ("'" ~ (svc_disc_rhel_svc.version_detected | default('') | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.version_detected | default(none) is not none else 'NULL' }},
+           {{ ("'" ~ (svc_disc_rhel_svc.running_user | default('') | string | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.running_user | default(none) is not none else 'NULL' }},
+           {{ ("'" ~ (svc_disc_rhel_svc.binary_path | default('') | string | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.binary_path | default(none) is not none else 'NULL' }},
+           {{ ("'" ~ (svc_disc_rhel_svc.version_detected | default('') | string | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.version_detected | default(none) is not none else 'NULL' }},
            {{ svc_disc_rhel_svc.uptime_seconds | default(none) if svc_disc_rhel_svc.uptime_seconds | default(none) is not none else 'NULL' }},
            {{ svc_disc_rhel_svc.cpu_usage_percent | default(none) if svc_disc_rhel_svc.cpu_usage_percent | default(none) is not none else 'NULL' }},
            {{ svc_disc_rhel_svc.memory_usage_mb | default(none) if svc_disc_rhel_svc.memory_usage_mb | default(none) is not none else 'NULL' }},
-           {{ ("'" ~ (svc_disc_rhel_svc.protocol | default('') | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.protocol | default(none) is not none else 'NULL' }},
+           {{ ("'" ~ (svc_disc_rhel_svc.protocol | default('') | string | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.protocol | default(none) is not none else 'NULL' }},
            '{{ svc_disc_rhel_svc.service_status }}',
            '{{ svc_disc_rhel_svc.severity }}',
-           {{ ("'" ~ (svc_disc_rhel_svc.last_state_change_timestamp | default('') | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.last_state_change_timestamp | default(none) is not none else 'NULL' }},
-           {{ ("'" ~ (svc_disc_rhel_svc.listening_ports | default([]) | join(',') | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.listening_ports | default(none) is not none and svc_disc_rhel_svc.listening_ports | default([]) | length > 0 else 'NULL' }})
+           {{ ("'" ~ (svc_disc_rhel_svc.last_state_change_timestamp | default('') | string | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.last_state_change_timestamp | default(none) is not none else 'NULL' }},
+           {{ ("'" ~ (svc_disc_rhel_svc.listening_ports | to_json | replace("'", "''"))) ~ "'" if svc_disc_rhel_svc.listening_ports | default(none) is not none and svc_disc_rhel_svc.listening_ports | default([]) | length > 0 else 'NULL' }})
 
     - name: Svc_disc_rhel | Oracle | INSERT OBS_SERVICE_LOG — {{ svc_disc_rhel_svc.service_name }}
       opitzconsulting.ansible_oracle.oracle_sql:
