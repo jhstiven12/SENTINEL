@@ -16,8 +16,8 @@
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          systemctl list-units --type=service --state=running
-          --no-legend --no-pager --plain 2>/dev/null | awk '{print $1}'
+          systemctl list-units --type=service --state=running \
+            --no-legend --no-pager --plain 2>/dev/null | awk '{print $1}'
       register: svc_disc_rhel_units_raw
       changed_when: false
       timeout: "{{ svc_disc_rhel_discovery_timeout }}"
