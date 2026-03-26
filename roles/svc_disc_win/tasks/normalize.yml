@@ -15,10 +15,8 @@
     svc_disc_win_win_normalized: >-
       {%- set ns = namespace(svcs=[]) -%}
       {%- for svc in svc_disc_win_services | default([]) -%}
-
         {%- set svc_name     = svc.ServiceName | default('unknown') -%}
         {%- set display_name = svc.DisplayName | default(svc_name) -%}
-
         {%- set matched = [] -%}
         {%- for entry in svc_disc_win_technology_map -%}
           {%- if (entry.keyword | lower in svc_name | lower
@@ -30,24 +28,18 @@
         {%- set tech = matched[0] if matched | length > 0
                        else {'service_type': svc_disc_win_default_service_type,
                              'technology': svc_disc_win_default_technology} -%}
-
         {%- set pid_int = svc.ProcessId | default(0) | int -%}
         {%- set pid_key = svc.ProcessId | string if pid_int > 0 else none -%}
-
         {%- set pid_ports  = (svc_disc_win_pid_ports | default({}))[pid_key] | default([]) if pid_key else [] -%}
         {%- set protocol   = pid_ports[0].get('protocol', none) if pid_ports | length > 0 else none -%}
         {%- set ports_json = pid_ports | to_json if pid_ports | length > 0 else none -%}
-
         {%- set uptime = (svc_disc_win_uptime_map | default({}))[pid_key] | default(none)
                          if pid_key else none -%}
-
         {%- set raw_path = (svc.PathName | default('') | regex_replace('"', '')).split(' ')[0] -%}
         {%- set binary   = raw_path if raw_path | length > 0 else none -%}
-
         {%- set svc_status = 'RUNNING' if svc.State | default('') | lower == 'running' else 'STOPPED' -%}
         {%- set severity   = svc_disc_win_severity_running
                              if svc_status == 'RUNNING' else svc_disc_win_severity_stopped -%}
-
         {%- set _ = ns.svcs.append({
           'service_name': svc_name | truncate(200, true, ''),
           'service_type': tech.service_type,
@@ -67,7 +59,6 @@
           '_source': 'win32',
           '_priority': 1
         }) -%}
-
       {%- endfor -%}
       {{ ns.svcs }}
     cacheable: false
@@ -112,7 +103,6 @@
   ansible.builtin.set_fact:
     svc_disc_win_sentinel_services: >-
       {%- set ns = namespace(by_pid={}, by_name={}, final=[]) -%}
-
       {%- for s in svc_disc_win_all_raw | default([]) -%}
         {%- set pid = s.pid | default(none) | string -%}
         {%- if pid and pid != 'None' and pid != '0' -%}
@@ -124,11 +114,9 @@
           {%- set _ = ns.final.append(s) -%}
         {%- endif -%}
       {%- endfor -%}
-
       {%- for pid, s in ns.by_pid.items() -%}
         {%- set _ = ns.final.append(s) -%}
       {%- endfor -%}
-
       {%- for s in ns.final -%}
         {%- set name = s.service_name -%}
         {%- if name not in ns.by_name
@@ -136,7 +124,6 @@
           {%- set _ = ns.by_name.update({name: s}) -%}
         {%- endif -%}
       {%- endfor -%}
-
       {%- set clean = [] -%}
       {%- for name, s in ns.by_name.items() -%}
         {%- set cleaned = {} -%}

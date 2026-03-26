@@ -83,10 +83,8 @@
     svc_disc_win_java_services: >-
       {%- set ns = namespace(svcs=[]) -%}
       {%- for proc in svc_disc_win_java_proc_list | default([]) -%}
-
         {%- set cmdline = proc.CommandLine | default('') -%}
         {%- set pid     = proc.PID | string -%}
-
         {# ── Nombre de servicio desde cmdline ── #}
         {%- set svc_name = 'java-' ~ pid -%}
         {%- if '-jar ' in cmdline -%}
@@ -118,11 +116,9 @@
         {%- set tech = matched[0] if matched | length > 0
                        else {'service_type': svc_disc_win_java_default_service_type,
                              'technology': svc_disc_win_java_default_technology} -%}
-
         {%- set pid_ports  = (svc_disc_win_pid_ports | default({}))[pid] | default([]) -%}
         {%- set protocol   = pid_ports[0].get('protocol', none) if pid_ports | length > 0 else none -%}
         {%- set ports_json = pid_ports | to_json if pid_ports | length > 0 else none -%}
-
         {%- set _ = ns.svcs.append({
           'service_name': svc_name | truncate(200, true, ''),
           'service_type': tech.service_type,
@@ -140,7 +136,6 @@
           'severity': svc_disc_win_severity_running,
           'last_state_change_timestamp': none
         }) -%}
-
       {%- endfor -%}
       {{ ns.svcs }}
     cacheable: false

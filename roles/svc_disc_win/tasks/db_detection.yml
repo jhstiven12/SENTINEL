@@ -87,15 +87,12 @@
       {%- set raw = (svc_disc_win_db_raw.stdout | default('[]') | trim | from_json)
                     if (svc_disc_win_db_raw.stdout | default('') | trim | length > 2) else [] -%}
       {%- for proc in raw -%}
-
         {%- set pid     = proc.PID | string -%}
         {%- set pname   = proc.ProcessName | default('') | lower -%}
         {%- set cmdline = proc.CommandLine | default('') -%}
-
         {%- set svc_name = 'db-process-' ~ pid -%}
         {%- set svc_type = 'DATABASE' -%}
         {%- set tech     = 'UNKNOWN' -%}
-
         {%- if 'oracle' in pname -%}
           {%- set svc_name = 'oracle-db' -%}
           {%- set tech     = 'ORACLE' -%}
@@ -115,11 +112,9 @@
           {%- set svc_name = 'mssql-server' -%}
           {%- set tech     = 'MSSQLSERVER' -%}
         {%- endif -%}
-
         {%- set pid_ports  = (svc_disc_win_pid_ports | default({}))[pid] | default([]) -%}
         {%- set protocol   = pid_ports[0].get('protocol', none) if pid_ports | length > 0 else none -%}
         {%- set ports_json = pid_ports | to_json if pid_ports | length > 0 else none -%}
-
         {%- set _ = ns.svcs.append({
           'service_name': svc_name | truncate(200, true, ''),
           'service_type': svc_type,
@@ -137,7 +132,6 @@
           'severity': svc_disc_win_severity_running,
           'last_state_change_timestamp': none
         }) -%}
-
       {%- endfor -%}
       {{ ns.svcs }}
     cacheable: false
