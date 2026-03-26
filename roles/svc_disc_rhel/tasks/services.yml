@@ -130,7 +130,7 @@
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      bin="{{ ((item.get('ExecStart','') | trim | regex_search('path=([^\\s;]+)', '\\1')) or [''])[0] if (item.get('ExecStart','') | trim).startswith('{') else (item.get('ExecStart','') | trim).split() | first | default('') }}";
+      bin="{{ ((item.get('ExecStart','') | trim | regex_search('path=[^\\s;]+') or '')[5:]) if (item.get('ExecStart','') | trim).startswith('{') else (item.get('ExecStart','') | trim).split() | first | default('') }}";
       [ -x "$bin" ] && "$bin" --version 2>&1 | head -1 || true
   register: svc_disc_rhel_ver_raw
   changed_when: false
