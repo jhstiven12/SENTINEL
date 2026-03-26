@@ -148,7 +148,6 @@
       {%- set known_pids = svc_disc_rhel_parsed_services | default([])
                            | map(attribute='MainPID', default='0')
                            | map('trim') | list -%}
-
       {%- set ora_ver = svc_disc_rhel_db_ora_ver_raw.results[0].stdout | default('')
                           | trim if svc_disc_rhel_db_ora_ver_raw is defined
                           and svc_disc_rhel_db_ora_ver_raw.results | default([]) | length > 0
@@ -157,7 +156,6 @@
       {%- set mysql_ver = svc_disc_rhel_db_mysql_ver.stdout | default('') | trim -%}
       {%- set mongo_ver = svc_disc_rhel_db_mongo_ver.stdout | default('') | trim -%}
       {%- set mssql_ver = svc_disc_rhel_db_mssql_ver.stdout | default('') | trim -%}
-
       {%- for line in svc_disc_rhel_db_ps_raw.stdout_lines | default([]) -%}
         {%- set cols = line.split('|') -%}
         {%- if cols|length >= 6 -%}
@@ -167,15 +165,12 @@
           {%- set rss_kb = cols[3]|trim -%}
           {%- set etime = cols[4]|trim -%}
           {%- set cmdline = cols[5:]|join('|')|trim -%}
-
           {%- if pid not in known_pids -%}
-
             {# ── Clasificar motor ── #}
             {%- set svc_name = 'db-process-' ~ pid -%}
             {%- set svc_type = 'DATABASE' -%}
             {%- set tech = 'UNKNOWN' -%}
             {%- set version = none -%}
-
             {%- if 'ora_pmon_' in cmdline -%}
               {%- set sid = cmdline.split('ora_pmon_')[1].split()[0] | default('ORCL') -%}
               {%- set svc_name = 'oracle-db-' ~ sid -%}
@@ -213,7 +208,6 @@
               {%- set tech = 'MSSQLSERVER' -%}
               {%- set version = mssql_ver[:200] if mssql_ver|length > 0 else none -%}
             {%- endif -%}
-
             {# ── Mem / Uptime ── #}
             {%- set mem_mb = (rss_kb|float / 1024)|round(2) if rss_kb|length > 0 else none -%}
             {%- set uptime = none -%}
@@ -226,14 +220,11 @@
               {%- else                 -%}{%- set uptime = hms[0]|int -%}
               {%- endif -%}
             {%- endif -%}
-
             {# ── Puertos ── #}
             {%- set pid_ports = (svc_disc_rhel_pid_ports | default({}))[pid] | default([]) -%}
             {%- set protocol = pid_ports[0].get('protocol',none) if pid_ports|length > 0 else none -%}
             {%- set ports_json = pid_ports|to_json if pid_ports|length > 0 else none -%}
-
             {%- set binary = cmdline.split()[0] | default(none) -%}
-
             {%- set _ = ns.svcs.append({
               'service_name': svc_name | truncate(200, true, ''),
               'service_type': svc_type,

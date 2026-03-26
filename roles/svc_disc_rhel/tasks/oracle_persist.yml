@@ -1,24 +1,105 @@
 ---
 # =============================================================================
 # roles/svc_disc_rhel/tasks/oracle_persist.yml
-# Itera svc_disc_rhel_sentinel_services via include_tasks (loop en block
-# no está soportado en Ansible — se usa include_tasks por servicio)
+# Persiste TODOS los servicios del host en DOS bloques PL/SQL bulk:
+#   1. MERGE bulk → OBS_SERVICE      (upsert nombre/tipo/tecnología)
+#   2. INSERT bulk → OBS_SERVICE_LOG (log métricas del ciclo actual)
+#
+# Reduce 2N llamadas Oracle a 2 llamadas por host (N = servicios detectados).
+# Para 30 servicios: de 60 llamadas → 2 llamadas (30× menos round-trips).
 # =============================================================================
 
-- name: Svc_disc_rhel | Oracle | Persistir servicios de {{ inventory_hostname }}
-  block:
-    - name: Svc_disc_rhel | Oracle | Procesar servicio por servicio
-      ansible.builtin.include_tasks: oracle_persist_item.yml
-      loop: "{{ svc_disc_rhel_sentinel_services | default([]) }}"
-      loop_control:
-        loop_var: svc_disc_rhel_svc
-        label: "{{ svc_disc_rhel_svc.service_name }}"
-      tags: [oracle_insert, services]
+- name: Svc_disc_rhel | Oracle | Construir MERGE bulk OBS_SERVICE
+  ansible.builtin.set_fact:
+    svc_disc_rhel_bulk_merge_sql: >-
+      {%- set sch=svc_disc_rhel_oracle_schema -%}
+      {%- set sid=svc_disc_rhel_server_id -%}
+      {%- set ns=namespace(stmts=[]) -%}
+      {%- for svc in svc_disc_rhel_sentinel_services|default([]) -%}
+        {%- set sn=svc.service_name|replace("'","''") -%}
+        {%- set m="MERGE INTO "~sch~".OBS_SERVICE tgt USING (SELECT '"~sid~"' server_id,'"~sn~"' service_name FROM dual) src ON (tgt.SERVER_ID=src.server_id AND tgt.SERVICE_NAME=src.service_name) WHEN MATCHED THEN UPDATE SET tgt.SERVICE_TYPE='"~svc.service_type~"',tgt.TECHNOLOGY='"~svc.technology~"' WHEN NOT MATCHED THEN INSERT (SERVICE_ID,SERVER_ID,SERVICE_NAME,SERVICE_TYPE,TECHNOLOGY) VALUES ("~sch~".OBS_SERVICE_SEQ.NEXTVAL,'"~sid~"','"~sn~"','"~svc.service_type~"','"~svc.technology~"')" -%}
+        {%- set _ = ns.stmts.append("BEGIN "~m~"; EXCEPTION WHEN OTHERS THEN NULL; END;") -%}
+      {%- endfor -%}
+      {{ "BEGIN "~ns.stmts|join(" ")~" COMMIT; END;" if ns.stmts|length > 0 else "BEGIN NULL; END;" }}
+    cacheable: false
+  tags: [oracle_insert, services]
 
-  rescue:
-    - name: Svc_disc_rhel | Oracle | ERROR en bloque de persistencia
-      ansible.builtin.debug:
-        msg: >-
-          [ERROR] svc_disc_rhel — Bloque Oracle falló para {{ inventory_hostname }}.
-          {{ ansible_failed_result.msg | default('desconocido') }}
-      tags: [oracle_insert]
+- name: Svc_disc_rhel | Oracle | Ejecutar MERGE bulk OBS_SERVICE — {{ inventory_hostname }}
+  opitzconsulting.ansible_oracle.oracle_sql:
+    hostname: "{{ svc_disc_rhel_oracle_host }}"
+    port: "{{ svc_disc_rhel_oracle_port }}"
+    service_name: "{{ svc_disc_rhel_oracle_service }}"
+    username: "{{ svc_disc_rhel_oracle_user }}"
+    password: "{{ svc_disc_rhel_oracle_password }}"
+    mode: "sysdba"
+    sql: "{{ svc_disc_rhel_bulk_merge_sql }}"
+  environment:
+    ORACLE_HOME: /opt/oracle/instantclient
+    LD_LIBRARY_PATH: /opt/oracle/instantclient
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  no_log: false
+  delegate_to: "{{ svc_disc_rhel_oracle_db_node }}"
+  when: svc_disc_rhel_sentinel_services | default([]) | length > 0
+  tags: [oracle_insert, services]
+
+- name: Svc_disc_rhel | Oracle | Construir INSERT LOG bulk OBS_SERVICE_LOG
+  ansible.builtin.set_fact:
+    svc_disc_rhel_bulk_insert_sql: >-
+      {%- set sch=svc_disc_rhel_oracle_schema -%}
+      {%- set sid=svc_disc_rhel_server_id -%}
+      {%- set bid=svc_disc_rhel_batch_id -%}
+      {%- set ns=namespace(stmts=[]) -%}
+      {%- for svc in svc_disc_rhel_sentinel_services|default([]) -%}
+        {%- set sn=svc.service_name|replace("'","''") -%}
+        {%- set pid_sql=svc.pid|string if svc.pid|default(none) is not none else 'NULL' -%}
+        {%- set ru=svc.running_user|default(none) -%}
+        {%- set ru_sql=("'"~(ru|string|replace("'","''"))~"'") if ru is not none else 'NULL' -%}
+        {%- set bp=svc.binary_path|default(none) -%}
+        {%- set bp_sql=("'"~(bp|string|replace("'","''"))~"'") if bp is not none else 'NULL' -%}
+        {%- set vd=svc.version_detected|default(none) -%}
+        {%- set vd_sql=("'"~(vd|string|replace("'","''"))~"'") if vd is not none else 'NULL' -%}
+        {%- set up_sql=svc.uptime_seconds|string if svc.uptime_seconds|default(none) is not none else 'NULL' -%}
+        {%- set cpu_sql=svc.cpu_usage_percent|string if svc.cpu_usage_percent|default(none) is not none else 'NULL' -%}
+        {%- set mem_sql=svc.memory_usage_mb|string if svc.memory_usage_mb|default(none) is not none else 'NULL' -%}
+        {%- set proto=svc.protocol|default(none) -%}
+        {%- set proto_sql=("'"~(proto|string|replace("'","''"))~"'") if proto is not none else 'NULL' -%}
+        {%- set ts=svc.last_state_change_timestamp|default(none) -%}
+        {%- set ts_sql=("TO_TIMESTAMP('"~(ts|string|replace("'","''"))~"','YYYY-MM-DD HH24:MI:SS')") if ts is not none else 'NULL' -%}
+        {%- set lp=svc.listening_ports|default(none) -%}
+        {%- set lp_sql=("'"~(lp|to_json|replace("'","''"))~"'") if lp is not none and lp|length > 0 else 'NULL' -%}
+        {%- set cols="LOG_ID,BATCH_ID,SERVER_ID,SERVICE_ID,COLLECTION_TIMESTAMP,PID,RUNNING_USER,BINARY_PATH,VERSION_DETECTED,UPTIME_SECONDS,CPU_USAGE_PERCENT,MEMORY_USAGE_MB,PROTOCOL,SERVICE_STATUS,SEVERITY,LAST_STATE_CHANGE_TIMESTAMP,LISTENING_PORTS" -%}
+        {%- set svcq="(SELECT SERVICE_ID FROM "~sch~".OBS_SERVICE WHERE SERVER_ID='"~sid~"' AND SERVICE_NAME='"~sn~"')" -%}
+        {%- set vals=sch~".OBS_SERVICE_LOG_SEQ.NEXTVAL,'"~bid~"','"~sid~"',"~svcq~",SYSTIMESTAMP,"~pid_sql~","~ru_sql~","~bp_sql~","~vd_sql~","~up_sql~","~cpu_sql~","~mem_sql~","~proto_sql~",'"~svc.service_status~"','"~svc.severity~"',"~ts_sql~","~lp_sql -%}
+        {%- set ins="INSERT INTO "~sch~".OBS_SERVICE_LOG("~cols~") VALUES("~vals~")" -%}
+        {%- set _ = ns.stmts.append("BEGIN "~ins~"; EXCEPTION WHEN OTHERS THEN NULL; END;") -%}
+      {%- endfor -%}
+      {{ "BEGIN "~ns.stmts|join(" ")~" COMMIT; END;" if ns.stmts|length > 0 else "BEGIN NULL; END;" }}
+    cacheable: false
+  tags: [oracle_insert, services]
+
+- name: Svc_disc_rhel | Oracle | Ejecutar INSERT LOG bulk OBS_SERVICE_LOG — {{ inventory_hostname }}
+  opitzconsulting.ansible_oracle.oracle_sql:
+    hostname: "{{ svc_disc_rhel_oracle_host }}"
+    port: "{{ svc_disc_rhel_oracle_port }}"
+    service_name: "{{ svc_disc_rhel_oracle_service }}"
+    username: "{{ svc_disc_rhel_oracle_user }}"
+    password: "{{ svc_disc_rhel_oracle_password }}"
+    mode: "sysdba"
+    sql: "{{ svc_disc_rhel_bulk_insert_sql }}"
+  environment:
+    ORACLE_HOME: /opt/oracle/instantclient
+    LD_LIBRARY_PATH: /opt/oracle/instantclient
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  no_log: false
+  delegate_to: "{{ svc_disc_rhel_oracle_db_node }}"
+  when: svc_disc_rhel_sentinel_services | default([]) | length > 0
+  tags: [oracle_insert, services]
+
+- name: Svc_disc_rhel | Oracle | Resumen persist — {{ inventory_hostname }}
+  ansible.builtin.debug:
+    msg: >-
+      svc_disc_rhel — Persistidos {{ svc_disc_rhel_sentinel_services | default([]) | length }}
+      servicio(s) en Oracle para {{ inventory_hostname }}.
+  tags: [oracle_insert, services]

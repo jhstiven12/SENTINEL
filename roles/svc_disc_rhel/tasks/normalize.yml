@@ -28,10 +28,8 @@
     svc_disc_rhel_systemd_normalized: >-
       {%- set ns = namespace(svcs=[]) -%}
       {%- for svc in svc_disc_rhel_parsed_services | default([]) -%}
-
         {%- set svc_id = svc.get('Id','unknown') -%}
         {%- set svc_name = svc_id | regex_replace('\\.service$','') -%}
-
         {%- set matched = [] -%}
         {%- for entry in svc_disc_rhel_technology_map -%}
           {%- if entry.keyword|lower in svc_name|lower and matched|length == 0 -%}
@@ -41,13 +39,10 @@
         {%- set tech = matched[0] if matched|length > 0
                        else {'service_type': svc_disc_rhel_default_service_type,
                              'technology': svc_disc_rhel_default_technology} -%}
-
         {%- set main_pid = svc.get('MainPID','0') | trim -%}
         {%- set ps_entry = (svc_disc_rhel_ps_map | default({}))[main_pid] | default({}) -%}
-
         {%- set rss_kb = ps_entry.get('rss_kb','') -%}
         {%- set mem_mb = (rss_kb|float / 1024)|round(2) if rss_kb|length > 0 else none -%}
-
         {%- set etime = ps_entry.get('etime','') -%}
         {%- set uptime = none -%}
         {%- if etime|length > 0 -%}
@@ -59,11 +54,9 @@
           {%- else                 -%}{%- set uptime = hms[0]|int -%}
           {%- endif -%}
         {%- endif -%}
-
         {%- set pid_ports = (svc_disc_rhel_pid_ports | default({}))[main_pid] | default([]) -%}
         {%- set protocol = pid_ports[0].get('protocol',none) if pid_ports|length > 0 else none -%}
         {%- set ports_json = pid_ports|to_json if pid_ports|length > 0 else none -%}
-
         {%- set active_state = svc.get('ActiveState','') | trim -%}
         {%- set sub_state = svc.get('SubState','') | trim -%}
         {%- set svc_status = 'RUNNING'
@@ -72,16 +65,13 @@
         {%- set severity = svc_disc_rhel_severity_running
                                if svc_status == 'RUNNING'
                                else svc_disc_rhel_severity_stopped -%}
-
         {%- set raw_ts = svc.get('ActiveEnterTimestamp','') | trim -%}
         {%- set _ts_iso = raw_ts | regex_search('\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}')
                           if raw_ts | length > 0 and raw_ts != 'n/a' else none -%}
         {%- set last_change = _ts_iso if _ts_iso else none -%}
-
         {%- set _exec_raw = svc.get('ExecStart','') | trim -%}
         {%- set _match = _exec_raw | regex_search('path=[^\\s;]+') if _exec_raw.startswith('{') else none -%}
         {%- set binary = ((_match or '')[5:] or none) if _exec_raw.startswith('{') else (_exec_raw.split()[0] if _exec_raw | length > 0 else none) -%}
-
         {%- set _ = ns.svcs.append({
           'service_name': svc_name | truncate(200, true, ''),
           'service_type': tech.service_type,
@@ -101,7 +91,6 @@
           '_source': 'systemd',
           '_priority': 1
         }) -%}
-
       {%- endfor -%}
       {{ ns.svcs }}
     cacheable: false
@@ -146,7 +135,6 @@
   ansible.builtin.set_fact:
     svc_disc_rhel_sentinel_services: >-
       {%- set ns = namespace(by_pid={}, by_name={}, final=[]) -%}
-
       {# Paso 1: Dedup por PID — menor _priority gana #}
       {%- for s in svc_disc_rhel_all_raw | default([]) -%}
         {%- set pid = s.pid | default(none) | string -%}
@@ -160,12 +148,10 @@
           {%- set _ = ns.final.append(s) -%}
         {%- endif -%}
       {%- endfor -%}
-
       {# Mover ganadores de PID al pool de paso 2 #}
       {%- for pid, s in ns.by_pid.items() -%}
         {%- set _ = ns.final.append(s) -%}
       {%- endfor -%}
-
       {# Paso 2: Dedup por service_name — menor _priority gana #}
       {%- for s in ns.final -%}
         {%- set name = s.service_name -%}
@@ -174,7 +160,6 @@
           {%- set _ = ns.by_name.update({name: s}) -%}
         {%- endif -%}
       {%- endfor -%}
-
       {# Limpiar campos internos _source y _priority antes de persistir #}
       {%- set clean = [] -%}
       {%- for name, s in ns.by_name.items() -%}

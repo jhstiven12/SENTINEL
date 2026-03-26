@@ -6,5 +6,6 @@
 - name: SENTINEL — Descubrimiento de servicios y procesos Java en Windows
   hosts: windows_servers
   gather_facts: true
+  strategy: free
   roles:
     - role: svc_disc_win

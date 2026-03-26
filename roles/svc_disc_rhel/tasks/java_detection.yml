@@ -142,13 +142,10 @@
     svc_disc_rhel_java_services: >-
       {%- set ns = namespace(svcs=[]) -%}
       {%- for proc in svc_disc_rhel_java_raw_list | default([]) -%}
-
         {%- set cmdline = proc.cmdline -%}
         {%- set pid     = proc.pid -%}
-
         {# ── Extraer nombre de servicio del cmdline ── #}
         {%- set svc_name = 'java-' ~ pid -%}
-
         {%- if '-jar ' in cmdline -%}
           {# Tomar el nombre del .jar sin extensión ni ruta #}
           {%- set jar_part = cmdline.split('-jar ')[1].split()[0] -%}
@@ -161,9 +158,7 @@
         {%- elif '-Dcatalina' in cmdline or 'catalina' in cmdline -%}
           {%- set svc_name = 'tomcat-direct' -%}
         {%- endif -%}
-
         {%- set svc_name = svc_name | truncate(200, true, '') -%}
-
         {# ── Clasificación tecnológica por keywords en cmdline ── #}
         {%- set matched = [] -%}
         {%- for entry in svc_disc_rhel_java_technology_map -%}
@@ -182,11 +177,9 @@
         {%- set tech = matched[0] if matched|length > 0
                        else {'service_type': svc_disc_rhel_java_default_service_type,
                              'technology': svc_disc_rhel_java_default_technology} -%}
-
         {# ── Stats de proceso ── #}
         {%- set rss_kb = proc.rss_kb -%}
         {%- set mem_mb = (rss_kb|float / 1024)|round(2) if rss_kb|length > 0 else none -%}
-
         {# ── Uptime desde etime ── #}
         {%- set etime  = proc.etime -%}
         {%- set uptime = none -%}
@@ -199,15 +192,12 @@
           {%- else                 -%}{%- set uptime = hms[0]|int -%}
           {%- endif -%}
         {%- endif -%}
-
         {# ── Puertos del proceso ── #}
         {%- set pid_ports  = (svc_disc_rhel_pid_ports | default({}))[pid] | default([]) -%}
         {%- set protocol   = pid_ports[0].get('protocol',none) if pid_ports|length > 0 else none -%}
         {%- set ports_json = pid_ports|to_json if pid_ports|length > 0 else none -%}
-
         {# ── Binario desde cmdline (primer token) ── #}
         {%- set binary = cmdline.split()[0] | default(none) -%}
-
         {%- set _ = ns.svcs.append({
           'service_name': svc_name,
           'service_type': tech.service_type,
@@ -225,7 +215,6 @@
           'severity': svc_disc_rhel_severity_running,
           'last_state_change_timestamp': none
         }) -%}
-
       {%- endfor -%}
       {{ ns.svcs }}
     cacheable: false

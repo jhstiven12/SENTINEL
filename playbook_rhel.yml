@@ -7,5 +7,6 @@
   hosts: rhel_servers
   gather_facts: true
   become: true
+  strategy: free
   roles:
     - role: svc_disc_rhel
