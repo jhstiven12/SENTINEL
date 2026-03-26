@@ -74,10 +74,13 @@
                                else svc_disc_rhel_severity_stopped -%}
 
         {%- set raw_ts = svc.get('ActiveEnterTimestamp','') | trim -%}
-        {%- set last_change = raw_ts if raw_ts|length > 0 and raw_ts != 'n/a' else none -%}
+        {%- set _ts_iso = raw_ts | regex_search('\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}')
+                          if raw_ts | length > 0 and raw_ts != 'n/a' else none -%}
+        {%- set last_change = _ts_iso if _ts_iso else none -%}
 
-        {%- set exec_start = (svc.get('ExecStart','') | trim).split(' ')[0] | default('') -%}
-        {%- set binary = exec_start if exec_start|length > 0 else none -%}
+        {%- set _exec_raw = svc.get('ExecStart','') | trim -%}
+        {%- set _pm = _exec_raw | regex_search('path=([^\\s;]+)', '\\1') if _exec_raw.startswith('{') else none -%}
+        {%- set binary = (_pm[0] if _pm else none) if _exec_raw.startswith('{') else (_exec_raw.split()[0] if _exec_raw | length > 0 else none) -%}
 
         {%- set _ = ns.svcs.append({
           'service_name': svc_name | truncate(200, true, ''),

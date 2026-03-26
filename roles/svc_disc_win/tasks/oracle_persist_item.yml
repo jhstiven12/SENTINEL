@@ -105,7 +105,7 @@
            {{ ("'" ~ (svc_disc_win_svc.protocol | default('') | string | replace("'", "''"))) ~ "'" if svc_disc_win_svc.protocol | default(none) is not none else 'NULL' }},
            '{{ svc_disc_win_svc.service_status }}',
            '{{ svc_disc_win_svc.severity }}',
-           {{ ("'" ~ (svc_disc_win_svc.last_state_change_timestamp | default('') | string | replace("'", "''"))) ~ "'" if svc_disc_win_svc.last_state_change_timestamp | default(none) is not none else 'NULL' }},
+           {{ "TO_TIMESTAMP('" ~ (svc_disc_win_svc.last_state_change_timestamp | string | replace("'", "''")) ~ "', 'YYYY-MM-DD HH24:MI:SS')" if svc_disc_win_svc.last_state_change_timestamp | default(none) is not none else 'NULL' }},
            {{ ("'" ~ (svc_disc_win_svc.listening_ports | to_json | replace("'", "''"))) ~ "'" if svc_disc_win_svc.listening_ports | default(none) is not none and svc_disc_win_svc.listening_ports | default([]) | length > 0 else 'NULL' }})
 
     - name: Svc_disc_win | oracle | INSERT OBS_SERVICE_LOG — {{ svc_disc_win_svc.service_name }}
