@@ -80,14 +80,16 @@
 
     - name: Svc_disc_rhel | Preflight | Debug — resultado consulta tablas
       ansible.builtin.debug:
-        var: svc_disc_rhel_preflight_tables
+        msg:
+          - "results type  : {{ svc_disc_rhel_preflight_tables.results | type_debug }}"
+          - "results value : {{ svc_disc_rhel_preflight_tables.results }}"
       run_once: true
       tags: [preflight]
 
     - name: Svc_disc_rhel | Preflight | Extraer conteo de tablas
       ansible.builtin.set_fact:
         svc_disc_rhel_table_count: >-
-          {{ svc_disc_rhel_preflight_tables.results[0]
+          {{ svc_disc_rhel_preflight_tables.results
              | dict2items | map(attribute='value') | list | first | int }}
       run_once: true
       tags: [preflight]
@@ -133,14 +135,16 @@
 
     - name: Svc_disc_rhel | Preflight | Debug — resultado consulta secuencias
       ansible.builtin.debug:
-        var: svc_disc_rhel_preflight_seqs
+        msg:
+          - "results type  : {{ svc_disc_rhel_preflight_seqs.results | type_debug }}"
+          - "results value : {{ svc_disc_rhel_preflight_seqs.results }}"
       run_once: true
       tags: [preflight]
 
     - name: Svc_disc_rhel | Preflight | Extraer conteo de secuencias
       ansible.builtin.set_fact:
         svc_disc_rhel_seq_count: >-
-          {{ svc_disc_rhel_preflight_seqs.results[0]
+          {{ svc_disc_rhel_preflight_seqs.results
              | dict2items | map(attribute='value') | list | first | int }}
       run_once: true
       tags: [preflight]
