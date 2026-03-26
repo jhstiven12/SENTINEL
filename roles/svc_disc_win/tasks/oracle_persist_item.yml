@@ -39,46 +39,6 @@
       no_log: false
       delegate_to: "{{ svc_disc_win_oracle_db_node }}"
 
-    - name: Svc_disc_win | oracle | SELECT SERVICE_ID — {{ svc_disc_win_svc.service_name }}
-      opitzconsulting.ansible_oracle.oracle_sql:
-        hostname: "{{ svc_disc_win_oracle_host }}"
-        port: "{{ svc_disc_win_oracle_port }}"
-        service_name: "{{ svc_disc_win_oracle_service }}"
-        username: "{{ svc_disc_win_oracle_user }}"
-        password: "{{ svc_disc_win_oracle_password }}"
-        mode: "sysdba"
-        sql: >-
-          SELECT SERVICE_ID FROM {{ svc_disc_win_oracle_schema }}.OBS_SERVICE
-          WHERE SERVER_ID = '{{ svc_disc_win_server_id }}'
-          AND SERVICE_NAME = '{{ svc_disc_win_svc.service_name | replace("'", "''") }}'
-      environment:
-        ORACLE_HOME: /opt/oracle/instantclient
-        LD_LIBRARY_PATH: /opt/oracle/instantclient
-      vars:
-        ansible_python_interpreter: /usr/bin/python3
-      no_log: false
-      register: svc_disc_win_svc_id_result
-      delegate_to: "{{ svc_disc_win_oracle_db_node }}"
-
-    - name: Svc_disc_win | oracle | DEBUG resultado SELECT SERVICE_ID
-      ansible.builtin.debug:
-        var: svc_disc_win_svc_id_result
-
-    - name: Svc_disc_win | oracle | Guardar svc_disc_win_current_service_id
-      ansible.builtin.set_fact:
-        cacheable: false
-        svc_disc_win_current_service_id: >-
-          {%- if 'results' in svc_disc_win_svc_id_result -%}
-            {%- set _rows = svc_disc_win_svc_id_result['results'] -%}
-            {%- if _rows is mapping -%}
-              {{ _rows | dict2items | map(attribute='value') | list | first | default(none) }}
-            {%- else -%}
-              {{ _rows | map(attribute='SERVICE_ID') | list | first | default(none) }}
-            {%- endif -%}
-          {%- else -%}
-            {{ none }}
-          {%- endif -%}
-
     - name: Svc_disc_win | oracle | Construir SQL INSERT OBS_SERVICE_LOG
       ansible.builtin.set_fact:
         cacheable: false
@@ -93,7 +53,9 @@
           ({{ svc_disc_win_oracle_schema }}.OBS_SERVICE_LOG_SEQ.NEXTVAL,
            '{{ svc_disc_win_batch_id }}',
            '{{ svc_disc_win_server_id }}',
-           {{ svc_disc_win_current_service_id | default('NULL', true) }},
+           (SELECT SERVICE_ID FROM {{ svc_disc_win_oracle_schema }}.OBS_SERVICE
+            WHERE SERVER_ID = '{{ svc_disc_win_server_id }}'
+            AND SERVICE_NAME = '{{ svc_disc_win_svc.service_name | replace("'", "''") }}'),
            SYSTIMESTAMP,
            {{ svc_disc_win_svc.pid | default(none) if svc_disc_win_svc.pid | default(none) is not none else 'NULL' }},
            {{ ("'" ~ (svc_disc_win_svc.running_user | default('') | string | replace("'", "''"))) ~ "'" if svc_disc_win_svc.running_user | default(none) is not none else 'NULL' }},
