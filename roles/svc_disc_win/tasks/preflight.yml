@@ -45,10 +45,9 @@
         password: "{{ svc_disc_win_oracle_password }}"
         mode: "sysdba"
         sql: >-
-          SELECT table_name FROM dba_tables
+          SELECT COUNT(*) AS cnt FROM dba_tables
           WHERE owner = UPPER('{{ svc_disc_win_oracle_schema }}')
           AND table_name IN ('OBS_BATCH_EXECUTION','OBS_SERVER','OBS_SERVICE','OBS_SERVICE_LOG')
-          ORDER BY table_name
       environment:
         ORACLE_HOME: /opt/oracle/instantclient
         LD_LIBRARY_PATH: /opt/oracle/instantclient
@@ -60,14 +59,20 @@
       register: svc_disc_win_preflight_tables
       tags: [preflight]
 
+    - name: Svc_disc_win | preflight | Debug — resultado consulta tablas
+      ansible.builtin.debug:
+        var: svc_disc_win_preflight_tables
+      run_once: true
+      tags: [preflight]
+
     - name: Svc_disc_win | preflight | Validar que las 4 tablas existen
       ansible.builtin.assert:
         that:
           - svc_disc_win_preflight_tables.results | default([]) | length > 0
-          - svc_disc_win_preflight_tables.results | length == 4
+          - svc_disc_win_preflight_tables.results[0].CNT | int == 4
         fail_msg: >-
           [FATAL] svc_disc_win — Faltan tablas en {{ svc_disc_win_oracle_schema }}.
-          Encontradas: {{ svc_disc_win_preflight_tables.results | default('ninguna') }}.
+          Encontradas: {{ svc_disc_win_preflight_tables.results[0].CNT | default('0') }} de 4.
           Ejecute ddl_changes.sql antes de continuar.
         success_msg: >-
           Preflight OK — Las 4 tablas del esquema {{ svc_disc_win_oracle_schema }} existen.
@@ -83,10 +88,9 @@
         password: "{{ svc_disc_win_oracle_password }}"
         mode: "sysdba"
         sql: >-
-          SELECT sequence_name FROM dba_sequences
+          SELECT COUNT(*) AS cnt FROM dba_sequences
           WHERE sequence_owner = UPPER('{{ svc_disc_win_oracle_schema }}')
           AND sequence_name IN ('OBS_SERVICE_SEQ','OBS_SERVICE_LOG_SEQ')
-          ORDER BY sequence_name
       environment:
         ORACLE_HOME: /opt/oracle/instantclient
         LD_LIBRARY_PATH: /opt/oracle/instantclient
@@ -98,11 +102,17 @@
       register: svc_disc_win_preflight_seqs
       tags: [preflight]
 
+    - name: Svc_disc_win | preflight | Debug — resultado consulta secuencias
+      ansible.builtin.debug:
+        var: svc_disc_win_preflight_seqs
+      run_once: true
+      tags: [preflight]
+
     - name: Svc_disc_win | preflight | Validar que las 2 secuencias existen
       ansible.builtin.assert:
         that:
           - svc_disc_win_preflight_seqs.results | default([]) | length > 0
-          - svc_disc_win_preflight_seqs.results | length == 2
+          - svc_disc_win_preflight_seqs.results[0].CNT | int == 2
         fail_msg: >-
           [FATAL] svc_disc_win — Faltan secuencias en {{ svc_disc_win_oracle_schema }}.
           Ejecute ddl_changes.sql antes de continuar.
